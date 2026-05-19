@@ -15,7 +15,7 @@ import {
     KLEIN_PROMPT_OPTIMIZER_REQUEST_TYPE,
     optimizeKleinPromptIfNeeded,
 } from './comfy_prompt_optimizer.js';
-import { ensureComfyReferenceBootstrap } from './comfy_reference_bootstrap.js?v=20260519_mobile_reference_bootstrap_guard_v1';
+import { ensureComfyReferenceBootstrap } from './comfy_reference_bootstrap.js?v=20260519_anchor_jank_guard_v1';
 
 const ANCHOR_PREFIX = 'chatu8_img';
 const RESULT_PREFIX = 'chatu8_img_result';
@@ -24,7 +24,7 @@ const IMAGE_TEXT_OPEN = 'image###';
 const IMAGE_TEXT_CLOSE = '###';
 const DEFAULT_MAX_ANCHORS = 5;
 const DEFAULT_TIMEOUT_MS = 8 * 60 * 1000;
-const TRACE_VERSION = '20260518_image_regen_icon_v1';
+const TRACE_VERSION = '20260519_anchor_jank_guard_v1';
 const TRACE_LOG_LIMIT = 30;
 const TRACE_DETAIL_STRING_LIMIT = 4000;
 const EMPTY_IMAGE_SRC = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
@@ -67,6 +67,7 @@ const liveAnchorPlaceholders = new Map();
 const generatedImageRefUrlCache = new Map();
 const hydratingGeneratedImages = new WeakMap();
 let queue = Promise.resolve();
+let traceConsoleRenderTimer = null;
 
 function settings() {
     if (!extension_settings[extensionName]) {
@@ -177,6 +178,17 @@ function trimTraceLog() {
     }
 }
 
+function scheduleTraceConsoleRender() {
+    if (traceConsoleRenderTimer || typeof window === 'undefined') {
+        return;
+    }
+
+    traceConsoleRenderTimer = window.setTimeout(() => {
+        traceConsoleRenderTimer = null;
+        renderTraceConsole();
+    }, 120);
+}
+
 function shouldRedactTraceKey(key) {
     return /api[_-]?key|authorization|bearer|password|secret|token/i.test(String(key || ''));
 }
@@ -284,7 +296,7 @@ function persistTraceLog(render = true) {
     trimTraceLog();
     saveSettingsDebounced();
     if (render) {
-        renderTraceConsole();
+        scheduleTraceConsoleRender();
     }
 }
 
@@ -2543,6 +2555,10 @@ async function showLiveAnchorPlaceholder(messageId, anchor, request, trace) {
 function refreshLiveAnchorPlaceholder(trace) {
     const entry = trace?.trace_id ? liveAnchorPlaceholders.get(trace.trace_id) : null;
     if (!entry) {
+        return;
+    }
+
+    if (trace?.status === 'running') {
         return;
     }
 
