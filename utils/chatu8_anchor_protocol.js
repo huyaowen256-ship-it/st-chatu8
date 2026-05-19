@@ -15,16 +15,18 @@ import {
     KLEIN_PROMPT_OPTIMIZER_REQUEST_TYPE,
     optimizeKleinPromptIfNeeded,
 } from './comfy_prompt_optimizer.js';
-import { ensureComfyReferenceBootstrap } from './comfy_reference_bootstrap.js?v=20260519_anchor_jank_guard_v1';
+import { ensureComfyReferenceBootstrap } from './comfy_reference_bootstrap.js?v=20260519_anchor_writeback_guard_v1';
 
 const ANCHOR_PREFIX = 'chatu8_img';
 const RESULT_PREFIX = 'chatu8_img_result';
 const ERROR_PREFIX = 'chatu8_img_error';
+const PLACEHOLDER_PREFIX = 'chatu8_img_placeholder';
+const PLACEHOLDER_END_PREFIX = 'chatu8_img_placeholder_end';
 const IMAGE_TEXT_OPEN = 'image###';
 const IMAGE_TEXT_CLOSE = '###';
 const DEFAULT_MAX_ANCHORS = 5;
 const DEFAULT_TIMEOUT_MS = 8 * 60 * 1000;
-const TRACE_VERSION = '20260519_anchor_jank_guard_v1';
+const TRACE_VERSION = '20260519_anchor_writeback_guard_v1';
 const TRACE_LOG_LIMIT = 30;
 const TRACE_DETAIL_STRING_LIMIT = 4000;
 const EMPTY_IMAGE_SRC = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
@@ -2031,7 +2033,7 @@ function parseImageTextAnchors(source) {
         const raw = source.slice(start, end + IMAGE_TEXT_CLOSE.length);
         const prompt = source.slice(bodyStart, end).trim();
         if (prompt) {
-            const id = `image_${anchors.length + 1}_${stableHash(raw)}`;
+            const id = `image_${stableHash(raw)}`;
             anchors.push({
                 id,
                 type: 'image_text',
@@ -2474,6 +2476,123 @@ function getLiveAnchorKey(messageId, anchorId) {
     return `${messageId}:${anchorId}`;
 }
 
+function anchorRawHash(anchor) {
+    const id = safeString(anchor?.id);
+    if (anchor?.type === 'image_text' && id.startsWith('image_')) {
+        return id.slice('image_'.length);
+    }
+
+    return stableHash(safeString(anchor?.raw));
+}
+
+function getStoredAnchorStateEntry(message, anchor) {
+    const state = message?.extra?.chatu8HiddenJsonAnchors;
+    if (!state || typeof state !== 'object') {
+        return null;
+    }
+
+    if (state[anchor?.id]) {
+        return state[anchor.id];
+    }
+
+    const hash = anchorRawHash(anchor);
+    const legacyKey = Object.keys(state).find((key) => key === anchor?.id || (hash && key.endsWith(`_${hash}`)));
+    return legacyKey ? state[legacyKey] : null;
+}
+
+function findPlaceholderRange(source, anchor, trace = null) {
+    const text = safeString(source);
+    const wantedId = safeString(anchor?.id);
+    const wantedTraceId = safeString(trace?.trace_id);
+    let cursor = 0;
+
+    while (cursor < text.length) {
+        const start = text.indexOf(`<!--${PLACEHOLDER_PREFIX}:`, cursor);
+        if (start === -1) {
+            return null;
+        }
+
+        const startEnd = text.indexOf('-->', start);
+        if (startEnd === -1) {
+            return null;
+        }
+
+        const jsonText = text.slice(start + PLACEHOLDER_PREFIX.length + 5, startEnd).trim();
+        let metadata = null;
+        try {
+            metadata = JSON.parse(jsonText);
+        } catch (_error) {
+            metadata = null;
+        }
+
+        const idMatches = !wantedId || metadata?.id === wantedId;
+        const traceMatches = !wantedTraceId || !metadata?.trace_id || metadata.trace_id === wantedTraceId;
+        if (idMatches && traceMatches) {
+            const endStart = text.indexOf(`<!--${PLACEHOLDER_END_PREFIX}:`, startEnd + 3);
+            if (endStart !== -1) {
+                const endEnd = text.indexOf('-->', endStart);
+                if (endEnd !== -1) {
+                    return { start, end: endEnd + 3 };
+                }
+            }
+        }
+
+        cursor = startEnd + 3;
+    }
+
+    return null;
+}
+
+function replacePersistedPlaceholder(source, anchor, replacement, trace = null) {
+    const range = findPlaceholderRange(source, anchor, trace);
+    if (!range) {
+        return null;
+    }
+
+    return `${source.slice(0, range.start)}${replacement}${source.slice(range.end)}`;
+}
+
+function replaceAnchorSourceText(message, anchor, replacement) {
+    const originalText = typeof message?.mes === 'string' ? message.mes : '';
+    if (!originalText) {
+        return { text: originalText, method: 'empty_message' };
+    }
+
+    if (anchor?.raw && originalText.includes(anchor.raw)) {
+        return {
+            text: originalText.replace(anchor.raw, replacement),
+            method: 'exact_raw',
+        };
+    }
+
+    const activeAnchors = parseActiveAnchors(originalText);
+    const wantedPrompt = safeString(anchor?.data?.prompt);
+    const wantedRawHash = stableHash(safeString(anchor?.raw));
+    const matchedAnchor = activeAnchors.find((candidate) => {
+        if (anchor?.id && candidate.id === anchor.id) {
+            return true;
+        }
+
+        if (candidate.raw && stableHash(candidate.raw) === wantedRawHash) {
+            return true;
+        }
+
+        return wantedPrompt && safeString(candidate.data?.prompt) === wantedPrompt;
+    });
+
+    if (matchedAnchor?.raw && originalText.includes(matchedAnchor.raw)) {
+        return {
+            text: originalText.replace(matchedAnchor.raw, replacement),
+            method: 'matched_active_anchor',
+        };
+    }
+
+    return {
+        text: originalText,
+        method: 'not_found',
+    };
+}
+
 function buildLiveAnchorPlaceholder(anchor, request, trace) {
     ensureFloatingWorkbenchStyles();
     const status = trace?.status || 'running';
@@ -2483,15 +2602,6 @@ function buildLiveAnchorPlaceholder(anchor, request, trace) {
     const subject = traceSubject(trace);
     const dimensions = request?.width && request?.height ? `${request.width}x${request.height}` : '';
     const promptStatus = tracePromptRewriteStatus(trace);
-    const visiblePrompt = safeString(anchor?.data?.prompt || request?.prompt || '');
-    const promptHtml = visiblePrompt
-        ? [
-            '<details class="st-chatu8-anchor-live-prompt" open>',
-            '<summary>正文生图提示词</summary>',
-            `<pre>image###\n${escapeHtml(visiblePrompt)}\n###</pre>`,
-            '</details>',
-        ].join('')
-        : '';
     const stepsHtml = TRACE_STEP_ORDER.map((item) => {
         const state = trace?.steps?.[item.id]?.status || 'pending';
         return `<span class="st-chatu8-anchor-live-step" data-status="${escapeHtml(state)}">${escapeHtml(item.label)}</span>`;
@@ -2505,7 +2615,7 @@ function buildLiveAnchorPlaceholder(anchor, request, trace) {
     ].filter(Boolean).map((item) => `<span class="st-chatu8-anchor-live-pill">${escapeHtml(item)}</span>`).join('');
 
     return [
-        `<!--chatu8_img_placeholder:${safeCommentJson({ id: anchor.id, trace_id: trace?.trace_id || '', status })}-->`,
+        `<!--${PLACEHOLDER_PREFIX}:${safeCommentJson({ id: anchor.id, trace_id: trace?.trace_id || '', status })}-->`,
         `<div class="st-chatu8-anchor-live-placeholder" data-status="${escapeHtml(status)}" data-st-chatu8-anchor-id="${escapeHtml(anchor.id)}" data-st-chatu8-trace-id="${escapeHtml(trace?.trace_id || '')}">`,
         '<div class="st-chatu8-anchor-live-head">',
         '<div class="st-chatu8-anchor-live-title">',
@@ -2516,8 +2626,8 @@ function buildLiveAnchorPlaceholder(anchor, request, trace) {
         '</div>',
         `<div class="st-chatu8-anchor-live-meta">${meta || '<span class="st-chatu8-anchor-live-pill">正在提交任务</span>'}</div>`,
         `<div class="st-chatu8-anchor-live-steps">${stepsHtml}</div>`,
-        promptHtml,
         '</div>',
+        `<!--${PLACEHOLDER_END_PREFIX}:${escapeHtml(anchor.id)}-->`,
     ].join('');
 }
 
@@ -2525,8 +2635,34 @@ function livePlaceholderEntriesForMessage(messageId) {
     return Array.from(liveAnchorPlaceholders.values()).filter((entry) => Number(entry.messageId) === Number(messageId));
 }
 
-function applyLiveAnchorPlaceholders(messageId, text) {
+function applyStoredAnchorStatePlaceholders(messageId, text) {
+    const message = chat[messageId];
+    const state = message?.extra?.chatu8HiddenJsonAnchors;
+    if (!message || !state || typeof state !== 'object') {
+        return String(text || '');
+    }
+
     let result = String(text || '');
+    const anchors = parseAnchors(result, { hiddenJson: false, imageText: true }).reverse();
+    for (const anchor of anchors) {
+        const stateEntry = getStoredAnchorStateEntry(message, anchor);
+        const status = safeString(stateEntry?.status);
+        if (!['running', 'done', 'failed'].includes(status) || !anchor?.raw || !result.includes(anchor.raw)) {
+            continue;
+        }
+
+        const trace = stateEntry?.trace_id ? findTrace(stateEntry.trace_id) : null;
+        const replacement = status === 'running'
+            ? buildLiveAnchorPlaceholder(anchor, { prompt: anchor.data?.prompt }, trace || { status: 'running' })
+            : '';
+        result = result.replace(anchor.raw, replacement);
+    }
+
+    return result;
+}
+
+function applyLiveAnchorPlaceholders(messageId, text) {
+    let result = applyStoredAnchorStatePlaceholders(messageId, text);
     for (const entry of livePlaceholderEntriesForMessage(messageId)) {
         if (!entry?.anchor?.raw || !result.includes(entry.anchor.raw)) {
             continue;
@@ -2541,14 +2677,34 @@ async function showLiveAnchorPlaceholder(messageId, anchor, request, trace) {
         return;
     }
 
+    const html = buildLiveAnchorPlaceholder(anchor, request, trace);
     liveAnchorPlaceholders.set(trace.trace_id, {
         key: getLiveAnchorKey(messageId, anchor.id),
         messageId,
         anchor,
         request,
         trace,
-        html: buildLiveAnchorPlaceholder(anchor, request, trace),
+        html,
     });
+
+    const message = chat[messageId];
+    const writeback = replaceAnchorSourceText(message, anchor, html);
+    if (message && writeback.text !== message.mes) {
+        message.mes = writeback.text;
+        const state = getMessageState(message);
+        state[anchor.id] = {
+            ...(state[anchor.id] || {}),
+            placeholder_persisted: true,
+            placeholder_method: writeback.method,
+            updated_at: new Date().toISOString(),
+        };
+        traceEvent(trace, 'placeholder:message_updated', {
+            message_id: messageId,
+            anchor_id: anchor?.id || '',
+            method: writeback.method,
+        }, false);
+    }
+
     await rerenderMessage(messageId, { emitUpdate: false });
 }
 
@@ -2998,13 +3154,13 @@ function isAnchorPending(stateEntry) {
     }
 
     if (stateEntry.status === 'done') {
-        return true;
+        return false;
     }
 
     if (stateEntry.status === 'running') {
         const trace = stateEntry.trace_id ? findTrace(stateEntry.trace_id) : null;
         if (trace?.status === 'done' || trace?.status === 'failed') {
-            return true;
+            return false;
         }
     }
 
@@ -3040,42 +3196,33 @@ async function rerenderMessage(messageId, options = {}) {
     }
 }
 
-function replaceAnchorTextForWriteback(message, anchor, replacement, status) {
+function replaceAnchorTextForWriteback(message, anchor, replacement, status, trace = null, placeholderHtml = '') {
     const originalText = typeof message?.mes === 'string' ? message.mes : '';
     if (!originalText) {
         return { text: originalText, method: 'empty_message' };
     }
 
-    if (anchor?.raw && originalText.includes(anchor.raw)) {
+    if (placeholderHtml && originalText.includes(placeholderHtml)) {
         return {
-            text: originalText.replace(anchor.raw, replacement),
-            method: 'exact_raw',
+            text: originalText.replace(placeholderHtml, replacement),
+            method: 'exact_placeholder',
         };
     }
 
-    const activeAnchors = parseActiveAnchors(originalText);
-    const wantedPrompt = safeString(anchor?.data?.prompt);
-    const wantedRawHash = stableHash(safeString(anchor?.raw));
-    const matchedAnchor = activeAnchors.find((candidate) => {
-        if (anchor?.id && candidate.id === anchor.id) {
-            return true;
-        }
-
-        if (candidate.raw && stableHash(candidate.raw) === wantedRawHash) {
-            return true;
-        }
-
-        return wantedPrompt && safeString(candidate.data?.prompt) === wantedPrompt;
-    });
-
-    if (matchedAnchor?.raw && originalText.includes(matchedAnchor.raw)) {
+    const placeholderReplaced = replacePersistedPlaceholder(originalText, anchor, replacement, trace);
+    if (placeholderReplaced !== null) {
         return {
-            text: originalText.replace(matchedAnchor.raw, replacement),
-            method: 'matched_active_anchor',
+            text: placeholderReplaced,
+            method: 'persisted_placeholder',
         };
     }
 
-    if (status === 'done') {
+    const sourceReplaced = replaceAnchorSourceText(message, anchor, replacement);
+    if (sourceReplaced.text !== originalText) {
+        return sourceReplaced;
+    }
+
+    if (status === 'done' && anchor?.type !== 'image_text') {
         return {
             text: `${originalText.trimEnd()}\n\n${replacement}`,
             method: 'append_fallback',
@@ -3094,9 +3241,9 @@ async function replaceAnchorInMessage(messageId, anchor, replacement, status, tr
         return;
     }
 
+    const liveEntry = trace?.trace_id ? liveAnchorPlaceholders.get(trace.trace_id) : null;
+    const writeback = replaceAnchorTextForWriteback(message, anchor, replacement, status, trace, liveEntry?.html || '');
     clearLiveAnchorPlaceholder(messageId, anchor, trace);
-
-    const writeback = replaceAnchorTextForWriteback(message, anchor, replacement, status);
     if (writeback.text === message.mes) {
         traceEvent(trace, 'writeback:not_found', {
             message_id: messageId,
@@ -3149,7 +3296,7 @@ async function processMessage(messageId, reason = 'event') {
     }
 
     const state = getMessageState(message);
-    const pending = anchors.filter((anchor) => isAnchorPending(state[anchor.id]));
+    const pending = anchors.filter((anchor) => isAnchorPending(getStoredAnchorStateEntry(message, anchor)));
     if (!pending.length) {
         return;
     }
