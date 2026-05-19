@@ -24,7 +24,7 @@ const IMAGE_TEXT_OPEN = 'image###';
 const IMAGE_TEXT_CLOSE = '###';
 const DEFAULT_MAX_ANCHORS = 5;
 const DEFAULT_TIMEOUT_MS = 8 * 60 * 1000;
-const TRACE_VERSION = '20260519_legacy_image_anchor_ui_v1';
+const TRACE_VERSION = '20260518_image_regen_icon_v1';
 const TRACE_LOG_LIMIT = 30;
 const TRACE_DETAIL_STRING_LIMIT = 4000;
 const EMPTY_IMAGE_SRC = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
@@ -67,7 +67,6 @@ const liveAnchorPlaceholders = new Map();
 const generatedImageRefUrlCache = new Map();
 const hydratingGeneratedImages = new WeakMap();
 let queue = Promise.resolve();
-let traceConsoleRenderTimer = null;
 
 function settings() {
     if (!extension_settings[extensionName]) {
@@ -178,17 +177,6 @@ function trimTraceLog() {
     }
 }
 
-function scheduleTraceConsoleRender() {
-    if (traceConsoleRenderTimer || typeof window === 'undefined') {
-        return;
-    }
-
-    traceConsoleRenderTimer = window.setTimeout(() => {
-        traceConsoleRenderTimer = null;
-        renderTraceConsole();
-    }, 120);
-}
-
 function shouldRedactTraceKey(key) {
     return /api[_-]?key|authorization|bearer|password|secret|token/i.test(String(key || ''));
 }
@@ -296,7 +284,7 @@ function persistTraceLog(render = true) {
     trimTraceLog();
     saveSettingsDebounced();
     if (render) {
-        scheduleTraceConsoleRender();
+        renderTraceConsole();
     }
 }
 
@@ -2477,16 +2465,6 @@ function getLiveAnchorKey(messageId, anchorId) {
 function buildLiveAnchorPlaceholder(anchor, request, trace) {
     ensureFloatingWorkbenchStyles();
     const status = trace?.status || 'running';
-    const label = status === 'failed' ? '\u751f\u6210\u5931\u8d25' : status === 'done' ? '\u751f\u6210\u5b8c\u6210' : '\u751f\u6210\u56fe\u7247';
-
-    return [
-        `<!--chatu8_img_placeholder:${safeCommentJson({ id: anchor.id, trace_id: trace?.trace_id || '', status })}-->`,
-        `<span class="st-chatu8-anchor-live-placeholder st-chatu8-anchor-legacy-placeholder" data-status="${escapeHtml(status)}" data-st-chatu8-anchor-id="${escapeHtml(anchor.id)}" data-st-chatu8-trace-id="${escapeHtml(trace?.trace_id || '')}">`,
-        '<span class="st-chatu8-anchor-live-spinner"></span>',
-        `<span class="st-chatu8-anchor-live-title">${escapeHtml(label)}</span>`,
-        '</span>',
-    ].join('');
-
     const statusText = traceReadableStatus(status);
     const step = currentTraceStep(trace);
     const stepText = step?.label || '准备生图';
@@ -2535,18 +2513,6 @@ function livePlaceholderEntriesForMessage(messageId) {
     return Array.from(liveAnchorPlaceholders.values()).filter((entry) => Number(entry.messageId) === Number(messageId));
 }
 
-function removeLiveAnchorPlaceholdersByKey(key, exceptTraceId = '') {
-    if (!key) {
-        return;
-    }
-
-    for (const [traceId, entry] of liveAnchorPlaceholders.entries()) {
-        if (traceId !== exceptTraceId && entry?.key === key) {
-            liveAnchorPlaceholders.delete(traceId);
-        }
-    }
-}
-
 function applyLiveAnchorPlaceholders(messageId, text) {
     let result = String(text || '');
     for (const entry of livePlaceholderEntriesForMessage(messageId)) {
@@ -2563,10 +2529,8 @@ async function showLiveAnchorPlaceholder(messageId, anchor, request, trace) {
         return;
     }
 
-    const key = getLiveAnchorKey(messageId, anchor.id);
-    removeLiveAnchorPlaceholdersByKey(key, trace.trace_id);
     liveAnchorPlaceholders.set(trace.trace_id, {
-        key,
+        key: getLiveAnchorKey(messageId, anchor.id),
         messageId,
         anchor,
         request,
@@ -2579,10 +2543,6 @@ async function showLiveAnchorPlaceholder(messageId, anchor, request, trace) {
 function refreshLiveAnchorPlaceholder(trace) {
     const entry = trace?.trace_id ? liveAnchorPlaceholders.get(trace.trace_id) : null;
     if (!entry) {
-        return;
-    }
-
-    if (entry.html?.includes('st-chatu8-anchor-legacy-placeholder')) {
         return;
     }
 
@@ -3261,59 +3221,7 @@ async function processMessage(messageId, reason = 'event') {
     }
 }
 
-async function showQueuedAnchorPlaceholders(messageId) {
-    if (!isEnabled()) {
-        return;
-    }
-
-    const numericId = Number(messageId);
-    if (!Number.isInteger(numericId) || numericId < 0) {
-        return;
-    }
-
-    const message = chat[numericId];
-    if (!message || message.is_user || message.is_system || typeof message.mes !== 'string') {
-        return;
-    }
-
-    const anchors = parseActiveAnchors(message.mes).slice(0, clampMaxAnchors(settings().chatu8HiddenJsonMaxAnchors));
-    if (!anchors.length) {
-        return;
-    }
-
-    const state = getMessageState(message);
-    let changed = false;
-    for (const anchor of anchors) {
-        if (!isAnchorPending(state[anchor.id])) {
-            continue;
-        }
-
-        const key = getLiveAnchorKey(numericId, anchor.id);
-        if (livePlaceholderEntriesForMessage(numericId).some((entry) => entry?.key === key)) {
-            continue;
-        }
-
-        const placeholderId = `queued:${key}`;
-        liveAnchorPlaceholders.set(placeholderId, {
-            key,
-            messageId: numericId,
-            anchor,
-            request: null,
-            trace: null,
-            html: buildLiveAnchorPlaceholder(anchor, null, null),
-        });
-        changed = true;
-    }
-
-    if (changed) {
-        await rerenderMessage(numericId, { emitUpdate: false });
-    }
-}
-
 function enqueueMessage(messageId, reason) {
-    showQueuedAnchorPlaceholders(messageId).catch((error) => {
-        console.warn('[st-chatu8] Failed to show queued image placeholder:', error);
-    });
     queue = queue.then(() => processMessage(messageId, reason)).catch((error) => {
         console.error('[st-chatu8] Image anchor processing failed:', error);
     });
