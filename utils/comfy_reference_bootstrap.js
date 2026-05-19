@@ -324,10 +324,19 @@ function presetAliases(preset, presetId) {
     return splitAliases(presetId, preset?.nameCN, preset?.nameEN);
 }
 
+function currentCharacterNameKeys(meta) {
+    return (meta?.names || []).map(normalizeName).filter((name) => name && name.length >= 2);
+}
+
+function currentCharacterAliasMatches(currentNames, alias) {
+    const normalized = normalizeName(alias);
+    return Boolean(normalized && normalized.length >= 2 && currentNames.includes(normalized));
+}
+
 function findCurrentCharacterPreset(meta, requireReference = false) {
     const data = settings();
     const presets = data.characterPresets || {};
-    const currentNames = (meta?.names || []).map(normalizeName).filter(Boolean);
+    const currentNames = currentCharacterNameKeys(meta);
     if (!currentNames.length) {
         return null;
     }
@@ -335,8 +344,8 @@ function findCurrentCharacterPreset(meta, requireReference = false) {
         if (!preset) {
             continue;
         }
-        const aliases = presetAliases(preset, presetId).map(normalizeName).filter(Boolean);
-        const matched = aliases.some((alias) => currentNames.some((name) => name === alias || name.includes(alias) || alias.includes(name)));
+        const aliases = presetAliases(preset, presetId);
+        const matched = aliases.some((alias) => currentCharacterAliasMatches(currentNames, alias));
         if (!matched) {
             continue;
         }
@@ -406,9 +415,9 @@ async function getReferenceProblem(request, meta) {
     }
     const currentPreset = findCurrentCharacterPreset(meta, false);
     if (!currentPreset) {
-        return null;
+        return { reason: 'new_character_without_reference', paths: [] };
     }
-    const paths = collectCandidateReferencePaths(request, meta);
+    const paths = currentPreset.path ? [currentPreset.path] : [];
     if (!paths.length) {
         return { reason: 'missing', paths: [] };
     }
