@@ -32,6 +32,228 @@
             <div id="negativePrompt_comfyui-results" class="ch-autocomplete-results"></div>
         </div>
         
+        <style>
+            .st-chatu8-comfy-world-panel {
+                margin: 16px 0 18px;
+                padding: 14px;
+                border: 1px solid rgba(132, 148, 156, 0.38);
+                border-radius: 8px;
+                background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(0, 0, 0, 0.08));
+            }
+
+            .st-chatu8-comfy-world-head {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                margin-bottom: 12px;
+            }
+
+            .st-chatu8-comfy-world-title {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                min-width: 0;
+            }
+
+            .st-chatu8-comfy-world-title h3 {
+                margin: 0;
+            }
+
+            .st-chatu8-comfy-world-chip {
+                display: inline-flex;
+                align-items: center;
+                min-height: 24px;
+                padding: 2px 8px;
+                border: 1px solid rgba(109, 184, 138, 0.55);
+                border-radius: 999px;
+                color: #9fd8b0;
+                font-size: 12px;
+                line-height: 1.2;
+                white-space: nowrap;
+            }
+
+            .st-chatu8-comfy-world-toggle {
+                display: inline-flex;
+                align-items: center;
+                gap: 8px;
+                padding: 6px 10px;
+                border: 1px solid rgba(201, 160, 78, 0.5);
+                border-radius: 8px;
+                color: #e2c37e;
+                cursor: pointer;
+                user-select: none;
+            }
+
+            .st-chatu8-comfy-world-grid {
+                display: grid;
+                grid-template-columns: minmax(160px, 0.8fr) minmax(220px, 1.2fr);
+                gap: 12px;
+            }
+
+            .st-chatu8-comfy-world-preview {
+                display: grid;
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+                gap: 8px;
+                margin-top: 12px;
+            }
+
+            .st-chatu8-comfy-world-preview-item {
+                min-width: 0;
+                padding: 10px;
+                border: 1px solid rgba(132, 148, 156, 0.32);
+                border-radius: 8px;
+                background: rgba(0, 0, 0, 0.12);
+            }
+
+            .st-chatu8-comfy-world-preview-label {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                margin-bottom: 6px;
+                color: #b8c8ce;
+                font-size: 12px;
+                text-transform: uppercase;
+            }
+
+            .st-chatu8-comfy-world-preview-text {
+                min-height: 42px;
+                max-height: 92px;
+                overflow: auto;
+                white-space: pre-wrap;
+                word-break: break-word;
+                font-size: 12px;
+                line-height: 1.45;
+            }
+
+            .st-chatu8-comfy-world-order {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 6px;
+                margin-top: 12px;
+            }
+
+            .st-chatu8-comfy-world-step {
+                display: inline-flex;
+                align-items: center;
+                gap: 5px;
+                min-height: 24px;
+                padding: 2px 8px;
+                border-radius: 6px;
+                background: rgba(132, 148, 156, 0.15);
+                font-size: 12px;
+                line-height: 1.2;
+            }
+
+            .st-chatu8-comfy-world-actions {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 10px;
+                margin-top: 12px;
+            }
+
+            .st-chatu8-comfy-world-save {
+                color: #9fb1b8;
+                font-size: 12px;
+            }
+
+            .st-chatu8-comfy-world-toolbar {
+                display: grid;
+                gap: 8px;
+                grid-template-columns: minmax(180px, 1fr) auto auto auto;
+                margin: 12px 0;
+            }
+
+            .st-chatu8-comfy-world-toolbar .st-chatu8-select {
+                min-width: 0;
+            }
+
+            @media (max-width: 720px) {
+                .st-chatu8-comfy-world-head,
+                .st-chatu8-comfy-world-actions {
+                    align-items: stretch;
+                    flex-direction: column;
+                }
+
+                .st-chatu8-comfy-world-grid,
+                .st-chatu8-comfy-world-preview,
+                .st-chatu8-comfy-world-toolbar {
+                    grid-template-columns: 1fr;
+                }
+            }
+        </style>
+
+        <div class="st-chatu8-comfy-world-panel" id="st_chatu8_comfy_world_style_panel">
+            <div class="st-chatu8-comfy-world-head">
+                <div class="st-chatu8-comfy-world-title">
+                    <h3>世界风格锁定</h3>
+                    <span class="st-chatu8-comfy-world-chip">Prompt Compiler</span>
+                </div>
+                <label class="st-chatu8-comfy-world-toggle" for="st_chatu8_comfy_debug_panel_enabled">
+                    <input type="checkbox" id="st_chatu8_comfy_debug_panel_enabled">
+                    <span>最终生图调试面板</span>
+                </label>
+                <label class="st-chatu8-comfy-world-toggle" for="st_chatu8_comfy_auto_outfit_preset_enabled">
+                    <input type="checkbox" id="st_chatu8_comfy_auto_outfit_preset_enabled">
+                    <span>剧情换装自动生成服装预设</span>
+                </label>
+            </div>
+
+            <div class="st-chatu8-comfy-world-toolbar">
+                <select id="st_chatu8_comfy_world_preset_select" class="st-chatu8-select" title="世界风格提示词预设"></select>
+                <button class="st-chatu8-btn" id="st_chatu8_comfy_world_generate" type="button" title="读取当前世界书并生成世界风格">
+                    <i class="fa-solid fa-wand-magic-sparkles"></i>世界书生成
+                </button>
+                <button class="st-chatu8-btn secondary" id="st_chatu8_comfy_world_save_as" type="button" title="另存为世界风格预设">
+                    <i class="fa-solid fa-floppy-disk"></i>另存
+                </button>
+                <button class="st-chatu8-btn secondary" id="st_chatu8_comfy_world_delete" type="button" title="删除当前世界风格预设">
+                    <i class="fa-solid fa-trash"></i>删除
+                </button>
+            </div>
+
+            <div class="st-chatu8-comfy-world-grid">
+                <div class="st-chatu8-field-col">
+                    <label for="st_chatu8_comfy_world_style_name">风格模板名</label>
+                    <input id="st_chatu8_comfy_world_style_name" class="st-chatu8-text-input" type="text" placeholder="例如：暗调写实 / 日系赛璐璐">
+                </div>
+                <div class="st-chatu8-field-col">
+                    <label for="st_chatu8_comfy_world_quality">质量词</label>
+                    <input id="st_chatu8_comfy_world_quality" class="st-chatu8-text-input" type="text" placeholder="masterpiece, best quality">
+                </div>
+            </div>
+
+            <div class="st-chatu8-field-col">
+                <label for="st_chatu8_comfy_world_positive">世界正面风格</label>
+                <textarea id="st_chatu8_comfy_world_positive" class="st-chatu8-textarea" rows="4" placeholder="画风、光影、镜头、色彩、材质、年代感"></textarea>
+            </div>
+
+            <div class="st-chatu8-field-col">
+                <label for="st_chatu8_comfy_world_negative">世界负面词</label>
+                <textarea id="st_chatu8_comfy_world_negative" class="st-chatu8-textarea" rows="3" placeholder="low quality, bad anatomy, watermark"></textarea>
+            </div>
+
+            <div class="st-chatu8-comfy-world-preview" id="st_chatu8_comfy_world_preview"></div>
+
+            <div class="st-chatu8-comfy-world-order" aria-label="ComfyUI prompt compile order">
+                <span class="st-chatu8-comfy-world-step"><i class="fa-solid fa-medal"></i>质量词</span>
+                <span class="st-chatu8-comfy-world-step"><i class="fa-solid fa-earth-asia"></i>世界风格</span>
+                <span class="st-chatu8-comfy-world-step"><i class="fa-solid fa-user"></i>单人控制</span>
+                <span class="st-chatu8-comfy-world-step"><i class="fa-solid fa-lock"></i>角色锁定</span>
+                <span class="st-chatu8-comfy-world-step"><i class="fa-solid fa-person-running"></i>动作表情</span>
+                <span class="st-chatu8-comfy-world-step"><i class="fa-solid fa-shirt"></i>服装状态</span>
+                <span class="st-chatu8-comfy-world-step"><i class="fa-solid fa-camera"></i>场景镜头</span>
+            </div>
+
+            <div class="st-chatu8-comfy-world-actions">
+                <button class="st-chatu8-btn secondary" id="st_chatu8_comfy_world_reset" type="button">
+                    <i class="fa-solid fa-rotate-left"></i>清空世界风格
+                </button>
+                <span class="st-chatu8-comfy-world-save" id="st_chatu8_comfy_world_save_hint">自动保存到 ComfyUI 生图设置</span>
+            </div>
+        </div>
+
         <h3>LORA</h3>
         <div class="st-chatu8-field">
             <label for="ComfyuiLORA">添加 LORA</label>
@@ -128,9 +350,9 @@
         </div>
     </div>
     <div class="st-chatu8-settings-section">
-        <h3>修图预设</h3>
+        <h3>角色首参考图生成工作流</h3>
         <div class="st-chatu8-field">
-            <label for="editWorkerid">修图工作流预设</label>
+            <label for="editWorkerid">角色首参考图工作流预设</label>
             <div class="st-chatu8-profile-controls">
                 <select id="editWorkerid" class="st-chatu8-select"></select>
                 <button class="st-chatu8-icon-btn" id="edit_worker_update_style" title="保存"><i class="fa-solid fa-save"></i></button>
@@ -142,8 +364,15 @@
             </div>
         </div>
         <div class="st-chatu8-field-col">
-            <label for="editWorker">修图工作流 (JSON)</label>
+            <label for="st_chatu8_character_reference_system_prompt">角色首参考图 LLM 系统提示词</label>
+            <textarea id="st_chatu8_character_reference_system_prompt" class="st-chatu8-textarea" rows="4" placeholder="例如：你是角色参考图 prompt 设计助手，请把角色资料整理成适合生图的英文提示词，重点保持身份特征、服装、构图清晰。"></textarea>
+        </div>
+        <div class="st-chatu8-field-col">
+            <label for="editWorker">角色首参考图生成工作流 (JSON)</label>
             <textarea id="editWorker" class="st-chatu8-textarea" rows="5"></textarea>
+            <div style="display: flex; gap: 10px; align-self: flex-end; margin-top: 10px;">
+                <button id="visualize_edit_workflow" class="st-chatu8-btn"><i class="fa-solid fa-diagram-project"></i> 可视化</button>
+            </div>
         </div>
     </div>
     <div class="st-chatu8-settings-section">
@@ -155,6 +384,353 @@
                 <input type="text" id="comfyuiUrl" class="st-chatu8-text-input" placeholder="http://127.0.0.1:8188">
                 <button id="testComfyui" class="st-chatu8-btn">连接刷新数据</button>
             </div>
+        </div>
+    </div>
+    <div class="st-chatu8-settings-section" id="st_chatu8_anchor_settings">
+        <style>
+            #st_chatu8_anchor_settings .st-chatu8-anchor-console {
+                display: grid;
+                gap: 12px;
+                margin: 12px 0 16px;
+                padding: 12px;
+                border: 1px solid rgba(132, 148, 156, 0.34);
+                border-radius: 8px;
+                background: rgba(0, 0, 0, 0.08);
+            }
+
+            #st_chatu8_anchor_settings .st-chatu8-anchor-console-head,
+            #st_chatu8_anchor_settings .st-chatu8-anchor-console-actions,
+            #st_chatu8_anchor_settings .st-chatu8-anchor-summary {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+            }
+
+            #st_chatu8_anchor_settings .st-chatu8-anchor-console-head {
+                justify-content: space-between;
+            }
+
+            #st_chatu8_anchor_settings .st-chatu8-anchor-console-title {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                min-width: 0;
+            }
+
+            #st_chatu8_anchor_settings .st-chatu8-anchor-console-title h5 {
+                margin: 0;
+                font-size: 14px;
+                line-height: 1.2;
+            }
+
+            #st_chatu8_anchor_settings .st-chatu8-anchor-copy-status {
+                min-width: 72px;
+                color: #9fb1b8;
+                font-size: 12px;
+                text-align: right;
+            }
+
+            #st_chatu8_anchor_settings .st-chatu8-anchor-summary {
+                flex-wrap: wrap;
+                min-height: 28px;
+                padding: 8px 0;
+                border-top: 1px solid rgba(132, 148, 156, 0.2);
+                border-bottom: 1px solid rgba(132, 148, 156, 0.2);
+                color: #b8c8ce;
+                font-size: 12px;
+            }
+
+            #st_chatu8_anchor_settings .st-chatu8-anchor-summary strong {
+                color: inherit;
+                font-weight: 700;
+            }
+
+            #st_chatu8_anchor_settings .st-chatu8-anchor-status-pill {
+                display: inline-flex;
+                align-items: center;
+                min-height: 22px;
+                padding: 2px 8px;
+                border-radius: 999px;
+                border: 1px solid rgba(132, 148, 156, 0.36);
+                color: #b8c8ce;
+                font-size: 12px;
+                line-height: 1.2;
+                white-space: nowrap;
+            }
+
+            #st_chatu8_anchor_settings .st-chatu8-anchor-status-running {
+                border-color: rgba(76, 166, 255, 0.58);
+                color: #8cc8ff;
+            }
+
+            #st_chatu8_anchor_settings .st-chatu8-anchor-status-done {
+                border-color: rgba(109, 184, 138, 0.58);
+                color: #9fd8b0;
+            }
+
+            #st_chatu8_anchor_settings .st-chatu8-anchor-status-failed {
+                border-color: rgba(235, 101, 101, 0.62);
+                color: #ff9b9b;
+            }
+
+            #st_chatu8_anchor_settings .st-chatu8-anchor-status-skipped {
+                border-color: rgba(201, 160, 78, 0.58);
+                color: #e2c37e;
+            }
+
+            #st_chatu8_anchor_settings .st-chatu8-anchor-timeline {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+                gap: 6px;
+            }
+
+            #st_chatu8_anchor_settings .st-chatu8-anchor-step {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                min-width: 0;
+                min-height: 30px;
+                padding: 5px 8px;
+                border: 1px solid rgba(132, 148, 156, 0.28);
+                border-radius: 6px;
+                background: rgba(132, 148, 156, 0.08);
+                color: #aebdc5;
+                font-size: 12px;
+                line-height: 1.2;
+                text-align: center;
+                word-break: keep-all;
+            }
+
+            #st_chatu8_anchor_settings .st-chatu8-anchor-step[data-status="running"] {
+                border-color: rgba(76, 166, 255, 0.58);
+                background: rgba(76, 166, 255, 0.1);
+                color: #8cc8ff;
+            }
+
+            #st_chatu8_anchor_settings .st-chatu8-anchor-step[data-status="done"] {
+                border-color: rgba(109, 184, 138, 0.58);
+                background: rgba(109, 184, 138, 0.1);
+                color: #9fd8b0;
+            }
+
+            #st_chatu8_anchor_settings .st-chatu8-anchor-step[data-status="failed"] {
+                border-color: rgba(235, 101, 101, 0.62);
+                background: rgba(235, 101, 101, 0.1);
+                color: #ff9b9b;
+            }
+
+            #st_chatu8_anchor_settings .st-chatu8-anchor-step[data-status="skipped"] {
+                border-color: rgba(201, 160, 78, 0.58);
+                background: rgba(201, 160, 78, 0.1);
+                color: #e2c37e;
+            }
+
+            #st_chatu8_anchor_settings .st-chatu8-anchor-log-shell {
+                display: grid;
+                grid-template-columns: minmax(180px, 0.72fr) minmax(240px, 1.28fr);
+                gap: 10px;
+                min-height: 180px;
+            }
+
+            #st_chatu8_anchor_settings .st-chatu8-anchor-trace-list {
+                display: grid;
+                align-content: start;
+                gap: 6px;
+                max-height: 260px;
+                overflow: auto;
+            }
+
+            #st_chatu8_anchor_settings .st-chatu8-anchor-trace-item {
+                display: grid;
+                grid-template-columns: 1fr auto;
+                gap: 4px 8px;
+                min-height: 44px;
+                padding: 8px;
+                border: 1px solid rgba(132, 148, 156, 0.24);
+                border-radius: 6px;
+                background: rgba(0, 0, 0, 0.1);
+                color: inherit;
+                cursor: pointer;
+                text-align: left;
+            }
+
+            #st_chatu8_anchor_settings .st-chatu8-anchor-trace-item:hover,
+            #st_chatu8_anchor_settings .st-chatu8-anchor-trace-item.is-selected {
+                border-color: rgba(76, 166, 255, 0.52);
+            }
+
+            #st_chatu8_anchor_settings .st-chatu8-anchor-trace-title,
+            #st_chatu8_anchor_settings .st-chatu8-anchor-trace-meta {
+                min-width: 0;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+
+            #st_chatu8_anchor_settings .st-chatu8-anchor-trace-title {
+                font-size: 12px;
+                font-weight: 700;
+            }
+
+            #st_chatu8_anchor_settings .st-chatu8-anchor-trace-meta {
+                grid-column: 1 / -1;
+                color: #9fb1b8;
+                font-size: 11px;
+            }
+
+            #st_chatu8_anchor_settings .st-chatu8-anchor-detail {
+                min-height: 180px;
+                max-height: 260px;
+                margin: 0;
+                padding: 10px;
+                overflow: auto;
+                border: 1px solid rgba(132, 148, 156, 0.24);
+                border-radius: 6px;
+                background: rgba(0, 0, 0, 0.16);
+                color: #dbe5ea;
+                font-size: 12px;
+                line-height: 1.45;
+                white-space: pre-wrap;
+                word-break: break-word;
+            }
+
+            @media (max-width: 780px) {
+                #st_chatu8_anchor_settings .st-chatu8-anchor-console-head,
+                #st_chatu8_anchor_settings .st-chatu8-anchor-console-actions {
+                    align-items: stretch;
+                    flex-direction: column;
+                }
+
+                #st_chatu8_anchor_settings .st-chatu8-anchor-copy-status {
+                    min-width: 0;
+                    text-align: left;
+                }
+
+                #st_chatu8_anchor_settings .st-chatu8-anchor-log-shell {
+                    grid-template-columns: 1fr;
+                }
+            }
+        </style>
+        <h4>Image 锚点自动生图</h4>
+        <div class="st-chatu8-field">
+            <label for="st_chatu8_anchor_enable">启用旧版 chatu8_img 锚点</label>
+            <input type="checkbox" id="st_chatu8_anchor_enable">
+        </div>
+        <div class="st-chatu8-field">
+            <label for="st_chatu8_image_anchor_enable">启用 image### 锚点</label>
+            <input type="checkbox" id="st_chatu8_image_anchor_enable">
+        </div>
+        <div class="st-chatu8-field">
+            <label for="st_chatu8_anchor_max">每条消息最大锚点数</label>
+            <input type="number" id="st_chatu8_anchor_max" class="st-chatu8-text-input" min="1" max="5" value="5">
+        </div>
+        <div class="st-chatu8-field">
+            <label for="st_chatu8_anchor_show_failures">生成失败时写入可见提示</label>
+            <input type="checkbox" id="st_chatu8_anchor_show_failures">
+        </div>
+        <div class="st-chatu8-field">
+            <label>协议状态</label>
+            <span id="st_chatu8_anchor_status">disabled</span>
+        </div>
+        <div class="st-chatu8-anchor-console" id="st_chatu8_anchor_trace_console">
+            <div class="st-chatu8-anchor-console-head">
+                <div class="st-chatu8-anchor-console-title">
+                    <i class="fa-solid fa-route"></i>
+                    <h5>生图任务台</h5>
+                </div>
+                <div class="st-chatu8-anchor-console-actions">
+                    <span class="st-chatu8-anchor-copy-status" id="st_chatu8_anchor_trace_copy_status"></span>
+                    <button class="st-chatu8-icon-btn" id="st_chatu8_anchor_trace_copy" type="button" title="复制排查包">
+                        <i class="fa-solid fa-copy"></i>
+                    </button>
+                    <button class="st-chatu8-icon-btn danger" id="st_chatu8_anchor_trace_clear" type="button" title="清空任务日志">
+                        <i class="fa-solid fa-trash"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="st-chatu8-anchor-summary" id="st_chatu8_anchor_trace_summary"></div>
+            <div class="st-chatu8-anchor-timeline" id="st_chatu8_anchor_trace_timeline"></div>
+            <div class="st-chatu8-anchor-log-shell">
+                <div class="st-chatu8-anchor-trace-list" id="st_chatu8_anchor_trace_list"></div>
+                <pre class="st-chatu8-anchor-detail" id="st_chatu8_anchor_trace_detail"></pre>
+            </div>
+        </div>
+        <div class="st-chatu8-field">
+            <label for="st_chatu8_klein_prompt_optimizer_enable">Klein Prompt 优化 LLM</label>
+            <input type="checkbox" id="st_chatu8_klein_prompt_optimizer_enable">
+        </div>
+        <div class="st-chatu8-field">
+            <label for="st_chatu8_klein_prompt_optimizer_mode">优化写入方式</label>
+            <select id="st_chatu8_klein_prompt_optimizer_mode" class="st-chatu8-select">
+                <option value="append">原文 + 优化补充</option>
+                <option value="raw">只用原文</option>
+                <option value="optimized">只用优化结果</option>
+            </select>
+        </div>
+        <div class="st-chatu8-field">
+            <label for="st_chatu8_klein_prompt_optimizer_request_type">LLM 请求类型</label>
+            <input type="text" id="st_chatu8_klein_prompt_optimizer_request_type" class="st-chatu8-text-input" placeholder="klein_prompt_optimize">
+        </div>
+        <div class="st-chatu8-field">
+            <label for="st_chatu8_klein_prompt_optimizer_api_profile">LLM API Profile</label>
+            <select id="st_chatu8_klein_prompt_optimizer_api_profile" class="st-chatu8-select"></select>
+        </div>
+        <div class="st-chatu8-field-col">
+            <label for="st_chatu8_klein_prompt_optimizer_api_url">优化器 API Base URL</label>
+            <input type="text" id="st_chatu8_klein_prompt_optimizer_api_url" class="st-chatu8-text-input" placeholder="例如: https://api.openai.com/v1">
+        </div>
+        <div class="st-chatu8-field-col">
+            <label for="st_chatu8_klein_prompt_optimizer_api_key">优化器 API Key</label>
+            <input type="password" id="st_chatu8_klein_prompt_optimizer_api_key" class="st-chatu8-text-input" placeholder="填写所选 LLM API Profile 的密钥">
+        </div>
+        <div class="st-chatu8-field-col">
+            <label for="st_chatu8_klein_prompt_optimizer_model">优化器模型</label>
+            <input type="text" id="st_chatu8_klein_prompt_optimizer_model" class="st-chatu8-text-input" placeholder="例如: gpt-4o-mini / qwen-plus">
+        </div>
+        <div class="st-chatu8-grid">
+            <div class="st-chatu8-field">
+                <label for="st_chatu8_klein_prompt_optimizer_temperature">Temperature</label>
+                <input type="number" id="st_chatu8_klein_prompt_optimizer_temperature" class="st-chatu8-text-input" min="0" max="2" step="0.01" placeholder="0.7">
+            </div>
+            <div class="st-chatu8-field">
+                <label for="st_chatu8_klein_prompt_optimizer_top_p">Top P</label>
+                <input type="number" id="st_chatu8_klein_prompt_optimizer_top_p" class="st-chatu8-text-input" min="0" max="1" step="0.01" placeholder="1">
+            </div>
+            <div class="st-chatu8-field">
+                <label for="st_chatu8_klein_prompt_optimizer_max_tokens">Max Tokens</label>
+                <input type="number" id="st_chatu8_klein_prompt_optimizer_max_tokens" class="st-chatu8-text-input" min="1" max="30000" step="1" placeholder="1200">
+            </div>
+        </div>
+        <div class="st-chatu8-field">
+            <label for="st_chatu8_klein_prompt_optimizer_bypass_proxy">优化器不通过酒馆代理</label>
+            <input type="checkbox" id="st_chatu8_klein_prompt_optimizer_bypass_proxy">
+        </div>
+        <div class="st-chatu8-field">
+            <label for="st_chatu8_klein_prompt_optimizer_context_profile">LLM 上下文 Profile</label>
+            <select id="st_chatu8_klein_prompt_optimizer_context_profile" class="st-chatu8-select"></select>
+        </div>
+        <div class="st-chatu8-field">
+            <label for="st_chatu8_klein_prompt_optimizer_fallback">优化失败回退原文</label>
+            <input type="checkbox" id="st_chatu8_klein_prompt_optimizer_fallback">
+        </div>
+        <div class="st-chatu8-field">
+            <label for="st_chatu8_klein_prompt_optimizer_manual_traits">优先使用角色管理视觉特征</label>
+            <input type="checkbox" id="st_chatu8_klein_prompt_optimizer_manual_traits">
+        </div>
+        <div class="st-chatu8-field">
+            <label for="st_chatu8_klein_prompt_optimizer_vision_traits">缺少手写特征时使用视觉缓存</label>
+            <input type="checkbox" id="st_chatu8_klein_prompt_optimizer_vision_traits">
+        </div>
+        <div class="st-chatu8-field">
+            <label for="st_chatu8_klein_prompt_optimizer_vision_mode">视觉缓存策略</label>
+            <select id="st_chatu8_klein_prompt_optimizer_vision_mode" class="st-chatu8-select">
+                <option value="missing_only">仅手写缺失时</option>
+                <option value="supplement">作为补充一并发送</option>
+            </select>
+        </div>
+        <div class="st-chatu8-field-col">
+            <label for="st_chatu8_klein_prompt_optimizer_system_prompt">优化 LLM 指令</label>
+            <textarea id="st_chatu8_klein_prompt_optimizer_system_prompt" class="st-chatu8-textarea" rows="8"></textarea>
         </div>
     </div>
     <div class="st-chatu8-settings-section">

@@ -1,0 +1,226 @@
+{
+  "2": {
+    "inputs": {
+      "ckpt_name": "oneObsession_v20Bold.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "模型：oneObsession，使用内置 VAE"
+    }
+  },
+  "3": {
+    "inputs": {
+      "clip_name": "CLIP-ViT-bigG-14-laion2B-39B-b160k.safetensors"
+    },
+    "class_type": "CLIPVisionLoader",
+    "_meta": {
+      "title": "CLIP Vision：本机实测 bigG 内容"
+    }
+  },
+  "4": {
+    "inputs": {
+      "ipadapter_file": "ip-adapter_sdxl.safetensors"
+    },
+    "class_type": "IPAdapterModelLoader",
+    "_meta": {
+      "title": "IPAdapter：和当前 CLIP 匹配"
+    }
+  },
+  "5": {
+    "inputs": {
+      "image": "-MVU-.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "参考图：放满意角色图"
+    }
+  },
+  "6": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "megapixels": 0.5,
+      "resolution_steps": 1,
+      "image": [
+        "5",
+        0
+      ]
+    },
+    "class_type": "ImageScaleToTotalPixels",
+    "_meta": {
+      "title": "参考图缩放：给 IPAdapter 用"
+    }
+  },
+  "8": {
+    "inputs": {
+      "weight": 0.55,
+      "weight_type": "linear",
+      "combine_embeds": "concat",
+      "start_at": 0,
+      "end_at": 0.6,
+      "embeds_scaling": "V only",
+      "model": [
+        "2",
+        0
+      ],
+      "ipadapter": [
+        "4",
+        0
+      ],
+      "image": [
+        "6",
+        0
+      ],
+      "clip_vision": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "IPAdapterAdvanced",
+    "_meta": {
+      "title": "低权重参考：角色一致性核心"
+    }
+  },
+  "9": {
+    "inputs": {
+      "text": "Masterpiece, Highest Quality, Amazing Quality, CG Style, 1 Girl",
+      "speak_and_recognation": {
+        "__value__": [
+          false,
+          true
+        ]
+      },
+      "clip": [
+        "2",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "角色锚点：固定不常改"
+    }
+  },
+  "10": {
+    "inputs": {
+      "text": "Lying in bed, half of the chest exposed, penetrated by a penis\nFantasy tavern background, cinematic composition, high resolution",
+      "speak_and_recognation": {
+        "__value__": [
+          false,
+          true
+        ]
+      },
+      "clip": [
+        "2",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "场景动作：每次主要改这里"
+    }
+  },
+  "11": {
+    "inputs": {
+      "conditioning_1": [
+        "9",
+        0
+      ],
+      "conditioning_2": [
+        "10",
+        0
+      ]
+    },
+    "class_type": "ConditioningCombine",
+    "_meta": {
+      "title": "合并：角色 + 场景"
+    }
+  },
+  "12": {
+    "inputs": {
+      "text": "worst quality, low quality, lowres, blurry, jpeg artifacts,\nbad anatomy, bad hands, bad fingers, extra fingers, missing fingers, extra limbs,\ndeformed face, distorted eyes, asymmetrical eyes,\ndifferent character, inconsistent face, wrong eye color, wrong hair color, wrong outfit, missing hair ornament,\ntext, watermark, signature, logo",
+      "speak_and_recognation": {
+        "__value__": [
+          false,
+          true
+        ]
+      },
+      "clip": [
+        "2",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "负面提示词：不常改"
+    }
+  },
+  "13": {
+    "inputs": {
+      "width": 832,
+      "height": 1216,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "画布尺寸：竖图 832x1216"
+    }
+  },
+  "14": {
+    "inputs": {
+      "seed": 454364027625906,
+      "steps": 30,
+      "cfg": 5.5,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "normal",
+      "denoise": 1,
+      "model": [
+        "8",
+        0
+      ],
+      "positive": [
+        "11",
+        0
+      ],
+      "negative": [
+        "12",
+        0
+      ],
+      "latent_image": [
+        "13",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "采样：质量优先"
+    }
+  },
+  "15": {
+    "inputs": {
+      "samples": [
+        "14",
+        0
+      ],
+      "vae": [
+        "2",
+        2
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "解码：使用模型内置 VAE"
+    }
+  },
+  "16": {
+    "inputs": {
+      "filename_prefix": "oneObsession_tavern_character",
+      "images": [
+        "15",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "保存结果"
+    }
+  }
+}

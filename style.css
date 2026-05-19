@@ -67,3 +67,29 @@
     color: var(--st-chatu8-text-primary);
     white-space: nowrap;
 }
+
+/* Center generated image results in chat messages. */
+.mes_text .st-chatu8-image-container,
+.mes_text .st-chatu8-generated-image-wrap,
+.mes_text .st-chatu8-image-result,
+.mes_text .chatu8-image-result,
+.mes_text [data-image-request-id] {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    width: 100%;
+}
+
+.mes_text .st-chatu8-image-container img,
+.mes_text .st-chatu8-generated-image-wrap img,
+.mes_text .st-chatu8-image-result img,
+.mes_text .chatu8-image-result img,
+.mes_text [data-image-request-id] img,
+.mes_text img[src^="data:image"] {
+    display: block;
+    margin-left: auto;
+    margin-right: auto;
+    max-width: min(100%, 768px);
+    height: auto;
+    object-fit: contain;
+}

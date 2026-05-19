@@ -57,6 +57,14 @@
                 <textarea id="char_photo_prompt" class="st-chatu8-textarea" rows="3" placeholder="输入用于生成角色图片的提示词..."></textarea>
                 <div id="char_photo_prompt-results" class="ch-autocomplete-results"></div>
             </div>
+            <div class="st-chatu8-field-col" style="margin-top: 10px;">
+                <label for="char_comfyRefImagePath">ComfyUI参考图路径（本地）</label>
+                <input type="text" id="char_comfyRefImagePath" class="st-chatu8-text-input" placeholder="D:\path\to\seraphina.png" />
+            </div>
+            <div class="st-chatu8-field-col" style="margin-top: 10px;">
+                <label for="char_comfyIdentityPrompt">ComfyUI角色主体提示词（可选）</label>
+                <textarea id="char_comfyIdentityPrompt" class="st-chatu8-textarea" rows="2" placeholder="只写稳定主体特征，不写服装、场景、姿势"></textarea>
+            </div>
             <div class="st-chatu8-field" style="margin-top: 10px; display: flex; gap: 10px; flex-wrap: wrap;">
                 <button class="st-chatu8-btn" id="char_photo_generate" style="flex: 1; min-width: 120px;">
                     <i class="fa-solid fa-wand-magic-sparkles"></i> 生成图片
