@@ -15,7 +15,7 @@ import {
     KLEIN_PROMPT_OPTIMIZER_REQUEST_TYPE,
     optimizeKleinPromptIfNeeded,
 } from './comfy_prompt_optimizer.js';
-import { ensureComfyReferenceBootstrap } from './comfy_reference_bootstrap.js?v=20260519_context_character_v3';
+import { ensureComfyReferenceBootstrap } from './comfy_reference_bootstrap.js?v=20260519_anchor_component_v4';
 
 const ANCHOR_PREFIX = 'chatu8_img';
 const RESULT_PREFIX = 'chatu8_img_result';
@@ -26,7 +26,7 @@ const IMAGE_TEXT_OPEN = 'image###';
 const IMAGE_TEXT_CLOSE = '###';
 const DEFAULT_MAX_ANCHORS = 5;
 const DEFAULT_TIMEOUT_MS = 8 * 60 * 1000;
-const TRACE_VERSION = '20260519_context_character_v3';
+const TRACE_VERSION = '20260519_anchor_component_v4';
 const TRACE_LOG_LIMIT = 30;
 const TRACE_DETAIL_STRING_LIMIT = 4000;
 const EMPTY_IMAGE_SRC = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
@@ -1581,12 +1581,19 @@ function ensureFloatingWorkbenchStyles() {
             display: inline-block;
             max-width: 100%;
             vertical-align: top;
+            --st-chatu8-result-width: 520px;
+            --st-chatu8-result-height: 820px;
         }
 
         .mes_text .st-chatu8-generated-image-wrap img.st-chatu8-generated-image {
             display: block;
-            max-width: 100%;
-            cursor: default;
+            width: auto;
+            height: auto;
+            max-width: min(100%, var(--st-chatu8-result-width, 520px));
+            max-height: min(72vh, var(--st-chatu8-result-height, 820px));
+            object-fit: contain;
+            cursor: zoom-in;
+            border-radius: 6px;
         }
 
         .mes_text .st-chatu8-image-regenerate-btn {
@@ -1716,6 +1723,86 @@ function ensureFloatingWorkbenchStyles() {
             border-top-color: #72bdff;
             border-radius: 999px;
             animation: stChatu8AnchorSpin 0.86s linear infinite;
+        }
+
+        .mes_text .st-chatu8-anchor-live-placeholder[data-st-chatu8-compact="true"] {
+            display: inline-flex !important;
+            align-items: center;
+            gap: 8px;
+            max-width: min(360px, 100%);
+            min-height: 36px;
+            margin: 6px 0;
+            padding: 6px 10px;
+            border: 1px solid rgba(114, 189, 255, 0.46);
+            border-radius: 8px;
+            background: rgba(18, 24, 30, 0.82);
+            color: #edf3f7;
+            font-size: 12px;
+            line-height: 1.35;
+            vertical-align: middle;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+        }
+
+        .mes_text .st-chatu8-anchor-live-placeholder[data-st-chatu8-compact="true"] .st-chatu8-anchor-live-label {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .mes_text .st-chatu8-image-fold-btn {
+            position: absolute;
+            top: 8px;
+            left: 8px;
+            z-index: 2;
+            min-width: 30px;
+            height: 30px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 5px;
+            padding: 0 8px;
+            border: 1px solid rgba(114, 189, 255, 0.5);
+            border-radius: 999px;
+            background: rgba(18, 24, 30, 0.86);
+            color: #dff2ff;
+            font-size: 12px;
+            line-height: 1;
+            cursor: pointer;
+            box-shadow: 0 6px 18px rgba(0, 0, 0, 0.32);
+        }
+
+        .mes_text .st-chatu8-image-fold-btn:hover {
+            background: rgba(36, 112, 180, 0.92);
+            border-color: rgba(157, 208, 255, 0.9);
+        }
+
+        .mes_text .st-chatu8-generated-image-folded {
+            display: none;
+            align-items: center;
+            gap: 8px;
+            max-width: min(360px, 100%);
+            min-height: 38px;
+            margin: 4px 0;
+            padding: 8px 11px;
+            border: 1px solid rgba(114, 189, 255, 0.45);
+            border-radius: 8px;
+            background: rgba(18, 24, 30, 0.82);
+            color: #dff2ff;
+            font-size: 12px;
+            line-height: 1.35;
+            cursor: pointer;
+            text-align: left;
+        }
+
+        .mes_text .st-chatu8-generated-image-wrap.is-folded > img.st-chatu8-generated-image,
+        .mes_text .st-chatu8-generated-image-wrap.is-folded > .st-chatu8-image-fold-btn,
+        .mes_text .st-chatu8-generated-image-wrap.is-folded > .st-chatu8-image-regenerate-btn {
+            display: none !important;
+        }
+
+        .mes_text .st-chatu8-generated-image-wrap.is-folded > .st-chatu8-generated-image-folded {
+            display: inline-flex;
         }
 
         .mes_text .st-chatu8-anchor-live-placeholder[data-status="failed"] .st-chatu8-anchor-live-spinner,
@@ -2321,11 +2408,15 @@ function buildResultReplacement(anchor, request, response, trace = null) {
     const wrapperAttrs = [
         'class="st-chatu8-generated-image-wrap"',
         'data-st-chatu8-result-wrap="true"',
+        'data-st-chatu8-foldable="true"',
         `data-st-chatu8-anchor-id="${escapeHtml(anchor.id)}"`,
         `data-st-chatu8-request-id="${escapeHtml(request.id)}"`,
         `data-st-chatu8-trace-id="${escapeHtml(traceId)}"`,
+        `style="--st-chatu8-result-width:${escapeHtml(width || 520)}px;--st-chatu8-result-height:${escapeHtml(height || 820)}px;"`,
     ].join(' ');
-    return `${marker}\n\n${title ? `**${title}**\n\n` : ''}<span ${wrapperAttrs}><button ${buttonAttrs}><i class="fa-solid fa-rotate-right"></i></button><img ${attrs}></span>`;
+    const foldButton = '<button class="st-chatu8-image-fold-btn" type="button" data-st-chatu8-fold-toggle="true" title="折叠图片"><i class="fa-solid fa-chevron-up"></i>折叠</button>';
+    const foldedButton = '<button class="st-chatu8-generated-image-folded" type="button" data-st-chatu8-fold-toggle="true" title="展开图片"><i class="fa-solid fa-image"></i>图片已折叠，点击展开</button>';
+    return `${marker}\n\n${title ? `**${title}**\n\n` : ''}<span ${wrapperAttrs}>${foldButton}<button ${buttonAttrs}><i class="fa-solid fa-rotate-right"></i></button><img ${attrs}>${foldedButton}</span>`;
 }
 
 function storedImageToMediaUrl(value, fallbackMimeType = 'image/png') {
@@ -2419,6 +2510,73 @@ function hydrateGeneratedImages(root = document) {
     root.querySelectorAll?.('img.st-chatu8-generated-image[data-st-chatu8-image-ref]').forEach((image) => {
         hydrateGeneratedImageNode(image);
     });
+
+    ensureGeneratedImageFoldControls(root);
+}
+
+function createGeneratedImageFoldButton() {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'st-chatu8-image-fold-btn';
+    button.dataset.stChatu8FoldToggle = 'true';
+    button.title = '折叠图片';
+    button.innerHTML = '<i class="fa-solid fa-chevron-up"></i>折叠';
+    return button;
+}
+
+function createGeneratedImageFoldedButton() {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'st-chatu8-generated-image-folded';
+    button.dataset.stChatu8FoldToggle = 'true';
+    button.title = '展开图片';
+    button.innerHTML = '<i class="fa-solid fa-image"></i>图片已折叠，点击展开';
+    return button;
+}
+
+function ensureGeneratedImageFoldControls(root = document) {
+    if (typeof document === 'undefined' || !root) {
+        return;
+    }
+
+    const wrappers = [];
+    if (root.matches?.('.st-chatu8-generated-image-wrap[data-st-chatu8-result-wrap]')) {
+        wrappers.push(root);
+    }
+    const closestWrapper = root.closest?.('.st-chatu8-generated-image-wrap[data-st-chatu8-result-wrap]');
+    if (closestWrapper) {
+        wrappers.push(closestWrapper);
+    }
+    root.querySelectorAll?.('.st-chatu8-generated-image-wrap[data-st-chatu8-result-wrap]').forEach((wrapper) => wrappers.push(wrapper));
+
+    for (const wrapper of Array.from(new Set(wrappers))) {
+        const children = Array.from(wrapper.children || []);
+        if (!children.some((child) => child.classList?.contains('st-chatu8-image-fold-btn'))) {
+            wrapper.insertBefore(createGeneratedImageFoldButton(), wrapper.firstChild);
+        }
+        if (!children.some((child) => child.classList?.contains('st-chatu8-generated-image-folded'))) {
+            wrapper.appendChild(createGeneratedImageFoldedButton());
+        }
+        wrapper.dataset.stChatu8Foldable = 'true';
+    }
+}
+
+function toggleGeneratedImageFold(target) {
+    const wrapper = target?.closest?.('.st-chatu8-generated-image-wrap[data-st-chatu8-result-wrap]');
+    if (!wrapper) {
+        return false;
+    }
+
+    const shouldFold = !wrapper.classList.contains('is-folded');
+    wrapper.classList.toggle('is-folded', shouldFold);
+    const foldButton = Array.from(wrapper.children || []).find((child) => child.classList?.contains('st-chatu8-image-fold-btn'));
+    if (foldButton) {
+        foldButton.title = shouldFold ? '展开图片' : '折叠图片';
+        foldButton.innerHTML = shouldFold
+            ? '<i class="fa-solid fa-chevron-down"></i>展开'
+            : '<i class="fa-solid fa-chevron-up"></i>折叠';
+    }
+    return true;
 }
 
 function bindGeneratedImageHydration() {
@@ -2458,17 +2616,17 @@ function buildErrorReplacement(anchor, error, trace = null) {
     const buttonAttrs = [
         'class="st-chatu8-image-regenerate-btn st-chatu8-image-regenerate-btn-error"',
         'type="button"',
-        'title="Retry image generation"',
+        `title="重新生成。失败详情：${escapeHtml(message)}"`,
         `data-st-chatu8-anchor-id="${escapeHtml(anchor.id)}"`,
         `data-st-chatu8-trace-id="${escapeHtml(traceId)}"`,
     ].join(' ');
     return [
         marker,
         '',
-        `<div class="st-chatu8-image-error-placeholder" data-st-chatu8-anchor-id="${escapeHtml(anchor.id)}" data-st-chatu8-trace-id="${escapeHtml(traceId)}">`,
+        `<span class="st-chatu8-image-error-placeholder" data-st-chatu8-error-compact="true" data-st-chatu8-anchor-id="${escapeHtml(anchor.id)}" data-st-chatu8-trace-id="${escapeHtml(traceId)}" title="${escapeHtml(message)}">`,
         `<button ${buttonAttrs}><i class="fa-solid fa-rotate-right"></i></button>`,
-        `<span>st-chatu8 image anchor "${escapeHtml(anchor.id)}" failed: ${escapeHtml(message)}</span>`,
-        '</div>',
+        '图片生成失败，点击重试',
+        '</span>',
     ].join('\n');
 }
 
@@ -2498,6 +2656,176 @@ function getStoredAnchorStateEntry(message, anchor) {
     const hash = anchorRawHash(anchor);
     const legacyKey = Object.keys(state).find((key) => key === anchor?.id || (hash && key.endsWith(`_${hash}`)));
     return legacyKey ? state[legacyKey] : null;
+}
+
+function traceForLegacyAnchor(messageId, anchorId, metadata = {}) {
+    const traceId = safeString(metadata.trace_id || metadata.traceId);
+    if (traceId) {
+        const trace = findTrace(traceId);
+        if (trace) {
+            return trace;
+        }
+    }
+
+    const message = chat[messageId];
+    const state = message?.extra?.chatu8HiddenJsonAnchors;
+    if (state && typeof state === 'object') {
+        const direct = state[anchorId];
+        const entry = direct || Object.entries(state).find(([key]) => key === anchorId || key.endsWith(`_${anchorId}`))?.[1];
+        const stateTrace = entry?.trace_id ? findTrace(entry.trace_id) : null;
+        if (stateTrace) {
+            return stateTrace;
+        }
+    }
+
+    return getTraceLog().slice().reverse().find((trace) => (
+        trace?.anchor_id === anchorId
+        && (!Number.isInteger(Number(messageId)) || Number(trace.message_id) === Number(messageId))
+    )) || null;
+}
+
+function legacyAnchorFromMetadata(metadata, messageId = 0) {
+    const id = safeString(metadata?.id || metadata?.anchor_id || metadata?.anchorId);
+    const trace = id ? traceForLegacyAnchor(messageId, id, metadata) : null;
+    const prompt = safeString(trace?.prompt_raw || trace?.prompt_final || trace?.prompt_optimized || trace?.prompt_comfy || metadata?.prompt);
+    return {
+        id: id || `image_legacy_${stableHash(prompt || JSON.stringify(metadata || {}))}`,
+        type: trace?.anchor_type || 'image_text',
+        data: {
+            id: id || '',
+            prompt,
+            context: safeString(trace?.source_context),
+            source: 'legacy_cleanup',
+            mode: safeString(trace?.mode, 'normal'),
+            width: numberOrUndefined(traceRequestDetail(trace, 'width')),
+            height: numberOrUndefined(traceRequestDetail(trace, 'height')),
+        },
+        raw: prompt ? `${IMAGE_TEXT_OPEN}${prompt}${IMAGE_TEXT_CLOSE}` : '',
+    };
+}
+
+function requestFromLegacyTrace(trace, anchor) {
+    return {
+        id: trace?.request_id || `chatu8_anchor_legacy:${anchor.id}`,
+        prompt: safeString(trace?.prompt_raw || trace?.prompt_final || anchor?.data?.prompt),
+        width: numberOrUndefined(traceRequestDetail(trace, 'width')),
+        height: numberOrUndefined(traceRequestDetail(trace, 'height')),
+        mode: safeString(trace?.mode, 'normal'),
+    };
+}
+
+function normalizeTraceStatusValue(value, fallback = 'running') {
+    const status = safeString(value, fallback);
+    const readableMap = {
+        待机: 'idle',
+        待处理: 'pending',
+        运行中: 'running',
+        完成: 'done',
+        失败: 'failed',
+        跳过: 'skipped',
+    };
+    return readableMap[status] || status || fallback;
+}
+
+function parseCommentMetadata(source, prefix, start) {
+    const startEnd = source.indexOf('-->', start);
+    if (startEnd === -1) {
+        return null;
+    }
+
+    const payload = source.slice(start + prefix.length + 5, startEnd).trim();
+    try {
+        return { metadata: JSON.parse(payload), end: startEnd + 3 };
+    } catch (_error) {
+        return { metadata: {}, end: startEnd + 3 };
+    }
+}
+
+function replacementForLegacyStatus(metadata, messageId = 0, fallbackStatus = '') {
+    const anchor = legacyAnchorFromMetadata(metadata, messageId);
+    const trace = traceForLegacyAnchor(messageId, anchor.id, metadata);
+    const status = normalizeTraceStatusValue(trace?.status || metadata?.status || fallbackStatus, 'running');
+    if (status === 'failed') {
+        const errorMessage = trace?.final?.error?.message || metadata?.error || '图片生成失败';
+        return buildErrorReplacement(anchor, new Error(errorMessage), trace);
+    }
+
+    return buildLiveAnchorPlaceholder(anchor, requestFromLegacyTrace(trace, anchor), trace || {
+        status,
+        trace_id: safeString(metadata?.trace_id),
+    });
+}
+
+function compactLegacyPersistedPlaceholders(source, messageId = 0) {
+    const text = String(source || '');
+    let cursor = 0;
+    let result = '';
+    let changed = false;
+
+    while (cursor < text.length) {
+        const start = text.indexOf(`<!--${PLACEHOLDER_PREFIX}:`, cursor);
+        if (start === -1) {
+            break;
+        }
+
+        const parsed = parseCommentMetadata(text, PLACEHOLDER_PREFIX, start);
+        if (!parsed) {
+            break;
+        }
+
+        const endStart = text.indexOf(`<!--${PLACEHOLDER_END_PREFIX}:`, parsed.end);
+        if (endStart === -1) {
+            break;
+        }
+
+        const endEnd = text.indexOf('-->', endStart);
+        if (endEnd === -1) {
+            break;
+        }
+
+        result += text.slice(cursor, start);
+        result += replacementForLegacyStatus(parsed.metadata, messageId);
+        cursor = endEnd + 3;
+        changed = true;
+    }
+
+    if (!changed) {
+        return text;
+    }
+
+    return result + text.slice(cursor);
+}
+
+function compactLegacyErrorBlocks(source, messageId = 0) {
+    const pattern = new RegExp(`<!--${ERROR_PREFIX}:([\\s\\S]*?)-->\\s*<(div|span)\\b(?=[^>]*\\bclass="[^"]*st-chatu8-image-error-placeholder)(?![^>]*\\bdata-st-chatu8-error-compact="true")[\\s\\S]*?<\\/\\2>`, 'gi');
+    return String(source || '').replace(pattern, (_match, payload) => {
+        let metadata = {};
+        try {
+            metadata = JSON.parse(payload.trim());
+        } catch (_error) {
+            metadata = {};
+        }
+        const anchor = legacyAnchorFromMetadata(metadata, messageId);
+        const trace = traceForLegacyAnchor(messageId, anchor.id, metadata);
+        return buildErrorReplacement(anchor, new Error(metadata.error || '图片生成失败'), trace);
+    });
+}
+
+function compactLegacyPlainStatusBlocks(source, messageId = 0) {
+    const steps = '识别锚点\\s*构建请求\\s*优化提示词\\s*参考图\\/工作流\\s*提交\\s*ComfyUI\\s*等待结果\\s*写回聊天';
+    const pattern = new RegExp(`(^|\\n)\\s*(?:识别锚点|构建请求|优化提示词|参考图\\/工作流|提交\\s*ComfyUI|等待结果|写回聊天)\\s*\\n\\s*(待处理|运行中|完成|失败|跳过)\\s*\\n[\\s\\S]{0,520}?锚点\\s*[：:]\\s*([\\w:-]+)[\\s\\S]{0,520}?${steps}`, 'g');
+    return String(source || '').replace(pattern, (match, lead, status, anchorId) => {
+        const metadata = { id: anchorId, status };
+        return `${lead}${replacementForLegacyStatus(metadata, messageId, status === '失败' ? 'failed' : 'running')}`;
+    });
+}
+
+function cleanupLegacyAnchorMarkup(text, messageId = 0) {
+    let result = String(text || '');
+    result = compactLegacyPersistedPlaceholders(result, messageId);
+    result = compactLegacyErrorBlocks(result, messageId);
+    result = compactLegacyPlainStatusBlocks(result, messageId);
+    return result;
 }
 
 function findPlaceholderRange(source, anchor, trace = null) {
@@ -2596,37 +2924,19 @@ function replaceAnchorSourceText(message, anchor, replacement) {
 function buildLiveAnchorPlaceholder(anchor, request, trace) {
     ensureFloatingWorkbenchStyles();
     const status = trace?.status || 'running';
-    const statusText = traceReadableStatus(status);
     const step = currentTraceStep(trace);
-    const stepText = step?.label || '准备生图';
-    const subject = traceSubject(trace);
-    const dimensions = request?.width && request?.height ? `${request.width}x${request.height}` : '';
-    const promptStatus = tracePromptRewriteStatus(trace);
-    const stepsHtml = TRACE_STEP_ORDER.map((item) => {
-        const state = trace?.steps?.[item.id]?.status || 'pending';
-        return `<span class="st-chatu8-anchor-live-step" data-status="${escapeHtml(state)}">${escapeHtml(item.label)}</span>`;
-    }).join('');
-
-    const meta = [
-        subject ? `主体：${subject}` : '',
-        dimensions ? `尺寸：${dimensions}` : '',
-        anchor?.id ? `锚点：${anchor.id}` : '',
-        promptStatus && promptStatus !== '未记录' ? `提示词：${promptStatus}` : '',
-    ].filter(Boolean).map((item) => `<span class="st-chatu8-anchor-live-pill">${escapeHtml(item)}</span>`).join('');
+    const label = status === 'failed'
+        ? '图片生成失败，点击重试'
+        : status === 'done'
+            ? '图片已生成'
+            : `${step?.label || '图片生成中'}...`;
 
     return [
         `<!--${PLACEHOLDER_PREFIX}:${safeCommentJson({ id: anchor.id, trace_id: trace?.trace_id || '', status })}-->`,
-        `<div class="st-chatu8-anchor-live-placeholder" data-status="${escapeHtml(status)}" data-st-chatu8-anchor-id="${escapeHtml(anchor.id)}" data-st-chatu8-trace-id="${escapeHtml(trace?.trace_id || '')}">`,
-        '<div class="st-chatu8-anchor-live-head">',
-        '<div class="st-chatu8-anchor-live-title">',
-        '<span class="st-chatu8-anchor-live-spinner"></span>',
-        `<span>${escapeHtml(stepText)}</span>`,
-        '</div>',
-        `<span class="st-chatu8-anchor-live-status">${escapeHtml(statusText)}</span>`,
-        '</div>',
-        `<div class="st-chatu8-anchor-live-meta">${meta || '<span class="st-chatu8-anchor-live-pill">正在提交任务</span>'}</div>`,
-        `<div class="st-chatu8-anchor-live-steps">${stepsHtml}</div>`,
-        '</div>',
+        `<span class="st-chatu8-anchor-live-placeholder" data-st-chatu8-compact="true" data-status="${escapeHtml(status)}" data-st-chatu8-anchor-id="${escapeHtml(anchor.id)}" data-st-chatu8-trace-id="${escapeHtml(trace?.trace_id || '')}" title="点击右下角生图工作台查看详情">`,
+        '<i class="st-chatu8-anchor-live-spinner"></i>',
+        escapeHtml(label),
+        '</span>',
         `<!--${PLACEHOLDER_END_PREFIX}:${escapeHtml(anchor.id)}-->`,
     ].join('');
 }
@@ -2654,7 +2964,9 @@ function applyStoredAnchorStatePlaceholders(messageId, text) {
         const trace = stateEntry?.trace_id ? findTrace(stateEntry.trace_id) : null;
         const replacement = status === 'running'
             ? buildLiveAnchorPlaceholder(anchor, { prompt: anchor.data?.prompt }, trace || { status: 'running' })
-            : '';
+            : status === 'failed'
+                ? buildErrorReplacement(anchor, new Error(trace?.final?.error?.message || '图片生成失败'), trace)
+                : '';
         result = result.replace(anchor.raw, replacement);
     }
 
@@ -2820,7 +3132,7 @@ function generatedImageSelector(image) {
     const errorBox = image?.closest?.('.st-chatu8-image-error-placeholder');
     const errorTraceId = safeString(errorBox?.dataset?.stChatu8TraceId);
     if (errorTraceId) {
-        return `<div\\b(?=[^>]*\\bclass="[^"]*st-chatu8-image-error-placeholder)(?=[^>]*\\bdata-st-chatu8-trace-id="${escapeRegExp(errorTraceId)}")[\\s\\S]*?<\\/div>`;
+        return `<(?:div|span)\\b(?=[^>]*\\bclass="[^"]*st-chatu8-image-error-placeholder)(?=[^>]*\\bdata-st-chatu8-trace-id="${escapeRegExp(errorTraceId)}")[\\s\\S]*?<\\/(?:div|span)>`;
     }
 
     const requestId = safeString(image?.dataset?.stChatu8RequestId);
@@ -2845,7 +3157,7 @@ function regenerationPlaceholder(anchor, trace) {
     ensureFloatingWorkbenchStyles();
     return [
         `<!--chatu8_img_regenerate:${safeCommentJson({ id: anchor.id, trace_id: trace?.trace_id || '', status: 'running' })}-->`,
-        `<div class="st-chatu8-anchor-live-placeholder" data-status="running" data-st-chatu8-regenerate-trace-id="${escapeHtml(trace?.trace_id || '')}"><button class="st-chatu8-image-regenerate-btn st-chatu8-image-regenerate-btn-running" type="button" disabled title="Generating image"><i class="fa-solid fa-rotate-right"></i></button><span>Regenerating image...</span></div>`,
+        `<span class="st-chatu8-anchor-live-placeholder" data-st-chatu8-compact="true" data-status="running" data-st-chatu8-regenerate-trace-id="${escapeHtml(trace?.trace_id || '')}"><button class="st-chatu8-image-regenerate-btn st-chatu8-image-regenerate-btn-running" type="button" disabled title="正在重新生成"><i class="fa-solid fa-rotate-right"></i></button>正在重新生成...</span>`,
     ].join('');
 }
 
@@ -2896,7 +3208,7 @@ async function regenerateGeneratedImage(image) {
     const request = buildRequest(anchor, messageId);
     const newTrace = createTrace(anchor, request, messageId, 'image_click_regenerate');
     appendTrace(newTrace);
-    const placeholderPattern = `<div\\b(?=[^>]*\\bdata-st-chatu8-regenerate-trace-id="${escapeRegExp(newTrace.trace_id)}")[\\s\\S]*?<\\/div>`;
+    const placeholderPattern = `<(?:div|span)\\b(?=[^>]*\\bdata-st-chatu8-regenerate-trace-id="${escapeRegExp(newTrace.trace_id)}")[\\s\\S]*?<\\/(?:div|span)>`;
 
     try {
         await writeRegenerationUpdate(messageId, initialPattern, regenerationPlaceholder(anchor, newTrace));
@@ -3035,6 +3347,13 @@ function bindGeneratedImagePromptViewer() {
 
     document.addEventListener('click', (event) => {
         if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+            return;
+        }
+
+        const foldToggle = event.target?.closest?.('[data-st-chatu8-fold-toggle="true"]');
+        if (foldToggle && toggleGeneratedImageFold(foldToggle)) {
+            event.preventDefault();
+            event.stopPropagation();
             return;
         }
 
@@ -3177,7 +3496,7 @@ async function rerenderMessage(messageId, options = {}) {
     if (!message) {
         return;
     }
-    const renderText = applyLiveAnchorPlaceholders(messageId, message.mes);
+    const renderText = applyLiveAnchorPlaceholders(messageId, cleanupLegacyAnchorMarkup(message.mes, messageId));
 
     const element = document.querySelector(`.mes[mesid="${String(messageId).replaceAll('"', '\\"')}"] .mes_text`);
     if (element) {
@@ -3728,6 +4047,35 @@ function installDebugProbe() {
     };
 }
 
+async function cleanupLegacyAnchorMessages() {
+    if (!Array.isArray(chat)) {
+        return;
+    }
+
+    const changedIds = [];
+    chat.forEach((message, index) => {
+        if (!message || typeof message.mes !== 'string') {
+            return;
+        }
+
+        const cleaned = cleanupLegacyAnchorMarkup(message.mes, index);
+        if (cleaned !== message.mes) {
+            message.mes = cleaned;
+            changedIds.push(index);
+        }
+    });
+
+    if (!changedIds.length) {
+        return;
+    }
+
+    await saveChatConditional();
+    for (const messageId of changedIds.slice(-30)) {
+        await rerenderMessage(messageId, { emitUpdate: false });
+    }
+    console.info(`[st-chatu8] Cleaned ${changedIds.length} legacy image anchor placeholder(s).`);
+}
+
 function initialize() {
     settings();
     installDebugProbe();
@@ -3742,6 +4090,7 @@ function initialize() {
     setTimeout(bindFloatingWorkbenchUi, 0);
     setTimeout(bindSettingsUi, 0);
     setTimeout(() => enqueueRecentAnchorMessages('initial_scan'), 1200);
+    setTimeout(() => cleanupLegacyAnchorMessages().catch((error) => console.warn('[st-chatu8] Failed to clean legacy image anchor placeholders:', error)), 1600);
     setInterval(bindFloatingWorkbenchUi, 2500);
     setInterval(bindSettingsUi, 1500);
 }
