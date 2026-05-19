@@ -1,6 +1,6 @@
-const ANCHOR_PROTOCOL_VERSION = '20260519_reference_guard_v2';
+const ANCHOR_PROTOCOL_VERSION = '20260519_context_character_v3';
 
-const IMAGE_PREVIEW_FIX_VERSION = '20260519_reference_guard_v2';
+const IMAGE_PREVIEW_FIX_VERSION = '20260519_context_character_v3';
 const IMAGE_PREVIEW_FIX_STYLE_ID = 'st-chatu8-image-preview-fix-style';
 const IMAGE_PREVIEW_LIGHTBOX_ID = 'st-chatu8-image-lightbox-fallback';
 const installedPreviewFixDocuments = new WeakSet();

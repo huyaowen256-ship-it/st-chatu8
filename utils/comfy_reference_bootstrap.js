@@ -138,6 +138,59 @@ function splitAliases(...values) {
     return result;
 }
 
+function uniqueStrings(values) {
+    const result = [];
+    const seen = new Set();
+    for (const value of values || []) {
+        const text = asString(value);
+        const key = normalizeName(text);
+        if (!text || !key || seen.has(key)) {
+            continue;
+        }
+        seen.add(key);
+        result.push(text);
+    }
+    return result;
+}
+
+function cleanExtractedCharacterName(value) {
+    let text = asString(value);
+    if (!text) {
+        return '';
+    }
+    text = text.split(/\s+(?:Type|Subject|Highlight|Angle|Character|Pose\s*&\s*Action|Pose|Action|Clothing|Extra\s+Details|Environment|Scene|Background)\s*[:\uFF1A]/i)[0];
+    text = text.split(/[\uFF0C,;\uFF1B\u3002.\n\r]/)[0];
+    text = text.replace(/^[\s:\uFF1A\-]+|[\s:\uFF1A\-]+$/g, '');
+    return text.length >= 2 && text.length <= 80 ? text : '';
+}
+
+function extractContextCharacterNames(text) {
+    const source = asString(text);
+    if (!source) {
+        return [];
+    }
+    const names = [];
+    const pattern = /(?:^|[\s\n\r])(?:Character|角色|人物|当前角色|主角)\s*[:\uFF1A]\s*([^\n\r]+)/gi;
+    for (const match of source.matchAll(pattern)) {
+        const name = cleanExtractedCharacterName(match[1]);
+        if (name) {
+            names.push(name);
+        }
+    }
+    return uniqueStrings(names);
+}
+
+function requestCharacterNames(request) {
+    const text = [
+        request?.debugSourceContext,
+        request?.sourceContext,
+        request?.context,
+        request?.prompt,
+        request?.debugPromptRaw,
+    ].map(asString).filter(Boolean).join('\n');
+    return extractContextCharacterNames(text);
+}
+
 function fileSafeName(value) {
     return (asString(value) || 'character')
         .replace(/[\\/:*?"<>|]+/g, '_')
@@ -283,11 +336,14 @@ async function collectWorldBookText(context, character) {
     return blocks.join('\n\n').slice(0, 12000);
 }
 
-async function currentCharacterMeta() {
+async function currentCharacterMeta(request = {}) {
     const context = typeof getContext === 'function' ? getContext() : {};
     const character = getCharacterFromContext(context) || {};
-    const names = collectCurrentNames(context, character);
-    const displayName = names[0] || '当前角色';
+    const contextNames = requestCharacterNames(request);
+    const currentNames = collectCurrentNames(context, character);
+    const stHasCurrentCharacter = hasCurrentCharacter(context, character);
+    const names = uniqueStrings([...(stHasCurrentCharacter ? currentNames : []), ...contextNames, ...currentNames]);
+    const displayName = (stHasCurrentCharacter ? currentNames[0] : contextNames[0]) || names[0] || '当前角色';
     const data = character.data && typeof character.data === 'object' ? character.data : character;
     const textFields = [
         ['name', displayName],
@@ -306,7 +362,7 @@ async function currentCharacterMeta() {
         .join('\n\n')
         .slice(0, 12000);
     const worldBookText = await collectWorldBookText(context, character);
-    return { context, character, names, displayName, cardText, worldBookText, hasCurrentCharacter: hasCurrentCharacter(context, character) };
+    return { context, character, names, displayName, cardText, worldBookText, hasCurrentCharacter: stHasCurrentCharacter || contextNames.length > 0 };
 }
 
 function presetReferencePath(preset) {
@@ -1160,7 +1216,7 @@ export async function ensureComfyReferenceBootstrap(request, context = {}) {
         return request;
     }
     syncBootstrapWorkerSelect();
-    const meta = await currentCharacterMeta();
+    const meta = await currentCharacterMeta(request);
     const referenceProblem = await getReferenceProblem(request, meta);
     if (!referenceProblem) {
         return request;
