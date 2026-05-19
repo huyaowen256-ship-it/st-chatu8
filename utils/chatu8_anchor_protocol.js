@@ -15,7 +15,7 @@ import {
     KLEIN_PROMPT_OPTIMIZER_REQUEST_TYPE,
     optimizeKleinPromptIfNeeded,
 } from './comfy_prompt_optimizer.js';
-import { ensureComfyReferenceBootstrap } from './comfy_reference_bootstrap.js?v=20260518_size_preserve_v1';
+import { ensureComfyReferenceBootstrap } from './comfy_reference_bootstrap.js?v=20260519_mobile_reference_bootstrap_guard_v1';
 
 const ANCHOR_PREFIX = 'chatu8_img';
 const RESULT_PREFIX = 'chatu8_img_result';
@@ -59,7 +59,7 @@ const DEFAULTS = {
     comfyPromptOptimizerUseVisionTraits: false,
     comfyPromptOptimizerVisionMode: 'missing_only',
     comfyPromptOptimizerSystemPrompt: DEFAULT_KLEIN_PROMPT_OPTIMIZER_SYSTEM_PROMPT,
-    comfyAutoReferenceBootstrapEnabled: true,
+    comfyAutoReferenceBootstrapEnabled: false,
 };
 
 const processingMessages = new Set();

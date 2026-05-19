@@ -6,7 +6,7 @@ import { EventType, extensionName } from './config.js';
 import { resolveComfyCharacterReferences } from './characterprompt.js';
 import { executeTypedLLMRequest } from './settings/llmService.js';
 
-const BOOTSTRAP_VERSION = '20260517_reference_bootstrap_v1';
+const BOOTSTRAP_VERSION = '20260519_mobile_reference_bootstrap_guard_v1';
 const BOOTSTRAP_REQUEST_TYPE = 'character_reference_bootstrap';
 const BOOTSTRAP_WORKER_SELECT_ID = 'comfyAutoReferenceBootstrapWorkerId';
 const BOOTSTRAP_TIMEOUT_MS = 8 * 60 * 1000;
@@ -25,6 +25,21 @@ function settings() {
         extension_settings[extensionName] = {};
     }
     return extension_settings[extensionName];
+}
+
+function isAutoReferenceBootstrapEnabled(data = settings()) {
+    if (data.comfyAutoReferenceBootstrapEnabled !== true) {
+        return false;
+    }
+    if (data.comfyAutoReferenceBootstrapExplicitlyEnabled === true) {
+        return true;
+    }
+    if (data.comfyAutoReferenceBootstrapMigratedOffVersion !== BOOTSTRAP_VERSION) {
+        data.comfyAutoReferenceBootstrapEnabled = false;
+        data.comfyAutoReferenceBootstrapMigratedOffVersion = BOOTSTRAP_VERSION;
+        saveSettingsDebounced();
+    }
+    return false;
 }
 
 function comfyWorkers() {
@@ -137,6 +152,12 @@ function getCharacterFromContext(context) {
         return context?.character || context?.currentCharacter || null;
     }
     return Array.isArray(characters) ? characters[Number(chid)] : characters[chid];
+}
+
+function hasCurrentCharacter(context, character) {
+    const chid = context?.characterId ?? context?.this_chid ?? (typeof window !== 'undefined' ? window.this_chid : undefined);
+    const hasValidId = chid !== undefined && chid !== null && String(chid).trim() !== '' && Number(chid) >= 0;
+    return hasValidId && Boolean(asString(character?.name || character?.avatar || context?.name2 || context?.characterName));
 }
 
 function collectCurrentNames(context, character) {
@@ -285,7 +306,7 @@ async function currentCharacterMeta() {
         .join('\n\n')
         .slice(0, 12000);
     const worldBookText = await collectWorldBookText(context, character);
-    return { context, character, names, displayName, cardText, worldBookText };
+    return { context, character, names, displayName, cardText, worldBookText, hasCurrentCharacter: hasCurrentCharacter(context, character) };
 }
 
 function presetReferencePath(preset) {
@@ -375,12 +396,16 @@ async function comfyInputImageExists(path) {
 
 async function getReferenceProblem(request, meta) {
     const data = settings();
-    if (data.comfyAutoReferenceBootstrapEnabled === false) {
+    if (!isAutoReferenceBootstrapEnabled(data) || !meta?.hasCurrentCharacter) {
         return null;
     }
     const adapter = asString(request?.workflowAdapter);
     const looksLikeKleinAnchor = adapter === 'flux2-klein-reference' || asString(request?.change).includes('chatu8_anchor');
     if (!looksLikeKleinAnchor) {
+        return null;
+    }
+    const currentPreset = findCurrentCharacterPreset(meta, false);
+    if (!currentPreset) {
         return null;
     }
     const paths = collectCandidateReferencePaths(request, meta);
@@ -832,11 +857,15 @@ function addStyle() {
             place-items: center;
             padding: 18px;
             background: rgba(8, 10, 14, 0.72);
+            overflow: auto;
+            box-sizing: border-box;
         }
         .st-chatu8-refboot-dialog {
             width: min(980px, 96vw);
-            max-height: 92vh;
-            overflow: auto;
+            max-height: min(92vh, 92dvh);
+            display: grid;
+            grid-template-rows: auto minmax(0, 1fr) auto;
+            overflow: hidden;
             border: 1px solid rgba(160, 180, 190, 0.26);
             border-radius: 8px;
             background: #15191f;
@@ -866,6 +895,8 @@ function addStyle() {
             grid-template-columns: minmax(0, 1fr) minmax(260px, 340px);
             gap: 14px;
             padding: 16px;
+            min-height: 0;
+            overflow: auto;
         }
         .st-chatu8-refboot-fields {
             display: grid;
@@ -948,9 +979,23 @@ function addStyle() {
             opacity: 0.8;
         }
         @media (max-width: 760px) {
+            .st-chatu8-refboot-overlay {
+                align-items: stretch;
+                justify-items: center;
+                padding: max(8px, env(safe-area-inset-top)) 8px max(8px, env(safe-area-inset-bottom));
+            }
+            .st-chatu8-refboot-dialog {
+                width: calc(100vw - 16px);
+                max-height: calc(100dvh - 16px);
+            }
+            .st-chatu8-refboot-header,
+            .st-chatu8-refboot-footer {
+                padding: 10px 12px;
+            }
             .st-chatu8-refboot-body { grid-template-columns: 1fr; }
+            .st-chatu8-refboot-preview { min-height: min(260px, 34dvh); }
             .st-chatu8-refboot-actions { margin-left: 0; width: 100%; }
-            .st-chatu8-refboot-actions .st-chatu8-btn { flex: 1 1 44%; }
+            .st-chatu8-refboot-actions .st-chatu8-btn { flex: 1 1 calc(50% - 8px); }
         }
     `;
     document.head.appendChild(style);
@@ -987,6 +1032,7 @@ function showBootstrapDialog(meta, request, bootstrapData) {
                 <div class="st-chatu8-refboot-footer">
                     <div class="st-chatu8-refboot-status st-chatu8-refboot-bottom-status"></div>
                     <div class="st-chatu8-refboot-actions">
+                        <button type="button" class="st-chatu8-btn st-chatu8-refboot-close">关闭</button>
                         <button type="button" class="st-chatu8-btn st-chatu8-refboot-translate">翻译/整理</button>
                         <button type="button" class="st-chatu8-btn st-chatu8-refboot-generate">生成首图</button>
                         <button type="button" class="st-chatu8-btn st-chatu8-refboot-bind" disabled>满意并绑定</button>
@@ -1003,13 +1049,18 @@ function showBootstrapDialog(meta, request, bootstrapData) {
         const generate = overlay.querySelector('.st-chatu8-refboot-generate');
         const translate = overlay.querySelector('.st-chatu8-refboot-translate');
         const bind = overlay.querySelector('.st-chatu8-refboot-bind');
-        const close = overlay.querySelector('.st-chatu8-refboot-close');
+        const closeButtons = overlay.querySelectorAll('.st-chatu8-refboot-close');
 
         const setStatus = (message, kind = '') => {
             status.textContent = message;
             status.dataset.kind = kind;
         };
+        let onKeyDown = null;
         const cleanup = () => {
+            if (onKeyDown) {
+                document.removeEventListener('keydown', onKeyDown);
+                onKeyDown = null;
+            }
             closed = true;
             overlay.remove();
             activeDialogPromise = null;
@@ -1020,10 +1071,25 @@ function showBootstrapDialog(meta, request, bootstrapData) {
             bind.disabled = busy || !generatedResponse;
         };
 
-        close.addEventListener('click', () => {
+        const cancel = () => {
             cleanup();
-            reject(new Error('已取消缺失参考图自动绑定流程。'));
+            const error = new Error('reference bootstrap canceled');
+            error.name = 'AbortError';
+            error.stChatu8Canceled = true;
+            reject(error);
+        };
+        closeButtons.forEach((button) => button.addEventListener('click', cancel));
+        overlay.addEventListener('click', (event) => {
+            if (event.target === overlay) {
+                cancel();
+            }
         });
+        onKeyDown = (event) => {
+            if (event.key === 'Escape') {
+                cancel();
+            }
+        };
+        document.addEventListener('keydown', onKeyDown);
         translate.addEventListener('click', async () => {
             try {
                 setBusy(true);
@@ -1076,8 +1142,6 @@ function showBootstrapDialog(meta, request, bootstrapData) {
                 }
             }
         });
-
-        setTimeout(() => generate.click(), 80);
     });
     return activeDialogPromise;
 }
@@ -1098,7 +1162,19 @@ export async function ensureComfyReferenceBootstrap(request, context = {}) {
         reference_paths: referenceProblem.paths,
     });
     const bootstrapData = await generateBootstrapData(meta, request);
-    const result = await showBootstrapDialog(meta, request, bootstrapData);
+    let result;
+    try {
+        result = await showBootstrapDialog(meta, request, bootstrapData);
+    } catch (error) {
+        if (error?.stChatu8Canceled || error?.name === 'AbortError') {
+            context?.traceStep?.(context.trace, 'workflow', 'skipped', {
+                reference_bootstrap: 'canceled',
+                character: meta.displayName,
+            });
+            return request;
+        }
+        throw error;
+    }
     context?.traceStep?.(context.trace, 'workflow', 'done', {
         reference_bootstrap: 'bound',
         character: meta.displayName,
