@@ -7,7 +7,7 @@ import { resolveComfyCharacterReferences } from './characterprompt.js';
 import { executeTypedLLMRequest } from './settings/llmService.js';
 import { extractCharacterAndOutfitTags } from './newline_fix.js';
 
-const BOOTSTRAP_VERSION = '20260521_reference_binding_identity_v1';
+const BOOTSTRAP_VERSION = '20260521_mobile_refboot_dialog_v1';
 const BOOTSTRAP_REQUEST_TYPE = 'char_design';
 const BOOTSTRAP_TRANSLATE_REQUEST_TYPE = 'translation';
 const BOOTSTRAP_WORKER_SELECT_ID = 'comfyAutoReferenceBootstrapWorkerId';
@@ -2350,17 +2350,23 @@ function addStyle() {
         .st-chatu8-refboot-overlay {
             position: fixed;
             inset: 0;
-            z-index: 10050;
+            z-index: 100500;
             display: grid;
             place-items: center;
             padding: 18px;
             background: rgba(8, 10, 14, 0.72);
             overflow: auto;
             box-sizing: border-box;
+            width: 100vw;
+            min-height: 100vh;
+            min-height: 100dvh;
+            overscroll-behavior: contain;
+            -webkit-overflow-scrolling: touch;
         }
         .st-chatu8-refboot-dialog {
             width: min(980px, 96vw);
-            max-height: min(92vh, 92dvh);
+            max-height: 92vh;
+            max-height: 92dvh;
             display: grid;
             grid-template-rows: auto minmax(0, 1fr) auto;
             overflow: hidden;
@@ -2369,6 +2375,10 @@ function addStyle() {
             background: #15191f;
             color: #edf4f7;
             box-shadow: 0 18px 60px rgba(0, 0, 0, 0.45);
+        }
+        .st-chatu8-refboot-dialog,
+        .st-chatu8-refboot-dialog * {
+            box-sizing: border-box;
         }
         .st-chatu8-refboot-header,
         .st-chatu8-refboot-footer {
@@ -2385,8 +2395,11 @@ function addStyle() {
             flex-wrap: wrap;
         }
         .st-chatu8-refboot-title {
+            min-width: 0;
             font-size: 15px;
             font-weight: 700;
+            line-height: 1.35;
+            overflow-wrap: anywhere;
         }
         .st-chatu8-refboot-body {
             display: grid;
@@ -2395,20 +2408,25 @@ function addStyle() {
             padding: 16px;
             min-height: 0;
             overflow: auto;
+            overscroll-behavior: contain;
+            -webkit-overflow-scrolling: touch;
         }
         .st-chatu8-refboot-fields {
             display: grid;
             gap: 10px;
+            min-width: 0;
         }
         .st-chatu8-refboot-label {
             display: grid;
             gap: 6px;
+            min-width: 0;
             font-size: 13px;
             font-weight: 650;
             color: #f2f7fa;
         }
         .st-chatu8-refboot-textarea {
             width: 100%;
+            max-width: 100%;
             min-height: 120px;
             resize: vertical;
             border: 1px solid rgba(160, 180, 190, 0.28);
@@ -2440,12 +2458,17 @@ function addStyle() {
             object-fit: contain;
         }
         .st-chatu8-refboot-status {
+            min-width: 0;
             font-size: 13px;
             color: #dce8ee;
             line-height: 1.45;
+            overflow-wrap: anywhere;
         }
         .st-chatu8-refboot-status[data-kind="error"] { color: #ffc2b8; }
         .st-chatu8-refboot-status[data-kind="ok"] { color: #c9f7d4; }
+        .st-chatu8-refboot-bottom-status {
+            flex: 1 1 260px;
+        }
         .st-chatu8-refboot-actions {
             display: flex;
             flex-wrap: wrap;
@@ -2480,19 +2503,49 @@ function addStyle() {
             .st-chatu8-refboot-overlay {
                 align-items: stretch;
                 justify-items: center;
+                padding: 8px;
                 padding: max(8px, env(safe-area-inset-top)) 8px max(8px, env(safe-area-inset-bottom));
             }
             .st-chatu8-refboot-dialog {
                 width: calc(100vw - 16px);
+                max-width: calc(100vw - 16px);
+                height: auto;
+                min-height: 0;
+                max-height: calc(100vh - 16px);
                 max-height: calc(100dvh - 16px);
+                grid-template-rows: auto minmax(0, 1fr) auto;
             }
             .st-chatu8-refboot-header,
             .st-chatu8-refboot-footer {
                 padding: 10px 12px;
+                align-items: flex-start;
             }
-            .st-chatu8-refboot-body { grid-template-columns: 1fr; }
-            .st-chatu8-refboot-preview { min-height: min(260px, 34dvh); }
-            .st-chatu8-refboot-actions { margin-left: 0; width: 100%; }
+            .st-chatu8-refboot-header {
+                gap: 8px;
+            }
+            .st-chatu8-refboot-header .st-chatu8-btn {
+                flex: 0 0 auto;
+            }
+            .st-chatu8-refboot-body {
+                grid-template-columns: 1fr;
+                gap: 10px;
+                padding: 12px;
+            }
+            .st-chatu8-refboot-textarea {
+                min-height: 104px;
+            }
+            .st-chatu8-refboot-preview {
+                min-height: 180px;
+                min-height: min(240px, 32vh);
+                min-height: min(240px, 32dvh);
+            }
+            .st-chatu8-refboot-bottom-status {
+                flex-basis: 100%;
+            }
+            .st-chatu8-refboot-actions {
+                margin-left: 0;
+                width: 100%;
+            }
             .st-chatu8-refboot-actions .st-chatu8-btn { flex: 1 1 calc(50% - 8px); }
         }
     `;
