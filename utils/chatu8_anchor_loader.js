@@ -1,4 +1,4 @@
-const ANCHOR_PROTOCOL_VERSION = '20260519_anchor_component_v4';
+const ANCHOR_PROTOCOL_VERSION = '20260521_reference_binding_identity_v1';
 
 const IMAGE_PREVIEW_FIX_VERSION = '20260519_anchor_component_v4';
 const IMAGE_PREVIEW_FIX_STYLE_ID = 'st-chatu8-image-preview-fix-style';
@@ -172,6 +172,8 @@ function injectImagePreviewFixStyle(doc) {
 
         .mes_text .st-chatu8-image-container img,
         .mes_text .st-chatu8-generated-image-wrap img,
+        .mes_text [data-st-chatu8-result-wrap="true"] img,
+        .mes_text img[data-st-chatu8-generated="true"],
         .mes_text .st-chatu8-image-result img,
         .mes_text .chatu8-image-result img,
         .mes_text [data-image-request-id] img,
@@ -202,7 +204,7 @@ function installPreviewClickFallback(doc) {
 
 function findPreviewableMedia(target) {
     const view = target.ownerDocument?.defaultView || window;
-    const root = target.closest('.mes_text, .mes, #chat, #chat_display, .st-chatu8-image-container, .st-chatu8-generated-image-wrap, .st-chatu8-image-result, .chatu8-image-result, [data-image-request-id]');
+    const root = target.closest('.mes_text, .mes, #chat, #chat_display, .st-chatu8-image-container, .st-chatu8-generated-image-wrap, [data-st-chatu8-result-wrap="true"], .st-chatu8-image-result, .chatu8-image-result, [data-image-request-id]');
     if (!root) return null;
     if (target.closest('.avatar, .avatar-container, #avatar_div, .ch_name, .mes_buttons')) return null;
 
@@ -210,7 +212,7 @@ function findPreviewableMedia(target) {
     if (!(mediaElement instanceof view.Element)) return null;
 
     const rect = mediaElement.getBoundingClientRect();
-    const isKnownGeneratedImage = Boolean(mediaElement.closest('.st-chatu8-image-container, .st-chatu8-generated-image-wrap, .st-chatu8-image-result, .chatu8-image-result, [data-image-request-id]'));
+    const isKnownGeneratedImage = Boolean(mediaElement.closest('.st-chatu8-image-container, .st-chatu8-generated-image-wrap, [data-st-chatu8-result-wrap="true"], .st-chatu8-image-result, .chatu8-image-result, [data-image-request-id]') || mediaElement.matches?.('img[data-st-chatu8-generated="true"]'));
     if (!isKnownGeneratedImage && rect.width < 120 && rect.height < 120) return null;
 
     if (mediaElement instanceof view.HTMLImageElement) {

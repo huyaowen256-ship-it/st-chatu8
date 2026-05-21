@@ -15,7 +15,7 @@ import {
     KLEIN_PROMPT_OPTIMIZER_REQUEST_TYPE,
     optimizeKleinPromptIfNeeded,
 } from './comfy_prompt_optimizer.js';
-import { ensureComfyReferenceBootstrap } from './comfy_reference_bootstrap.js?v=20260519_anchor_component_v4';
+import { ensureComfyReferenceBootstrap } from './comfy_reference_bootstrap.js?v=20260521_reference_binding_identity_v1';
 
 const ANCHOR_PREFIX = 'chatu8_img';
 const RESULT_PREFIX = 'chatu8_img_result';
@@ -26,10 +26,17 @@ const IMAGE_TEXT_OPEN = 'image###';
 const IMAGE_TEXT_CLOSE = '###';
 const DEFAULT_MAX_ANCHORS = 5;
 const DEFAULT_TIMEOUT_MS = 8 * 60 * 1000;
-const TRACE_VERSION = '20260519_anchor_component_v4';
+const TRACE_VERSION = '20260521_reference_binding_identity_v1';
 const TRACE_LOG_LIMIT = 30;
 const TRACE_DETAIL_STRING_LIMIT = 4000;
+const ERROR_RETRY_PROMPT_LIMIT = 12000;
 const EMPTY_IMAGE_SRC = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
+const GENERATED_IMAGE_WRAPPER_SELECTOR = '[data-st-chatu8-result-wrap="true"]';
+const GENERATED_IMAGE_REF_SELECTOR = 'img[data-st-chatu8-generated="true"][data-st-chatu8-image-ref], img.st-chatu8-generated-image[data-st-chatu8-image-ref]';
+const GENERATED_IMAGE_REGENERATE_BUTTON_SELECTOR = [
+    'button[class*="st-chatu8-image-regenerate-btn"]:not([disabled])',
+    'button[data-st-chatu8-anchor-id][data-st-chatu8-trace-id]:not([disabled]):not([data-st-chatu8-fold-toggle="true"])',
+].join(', ');
 const TRACE_STEP_ORDER = [
     { id: 'detect', label: '识别锚点' },
     { id: 'request', label: '构建请求' },
@@ -115,6 +122,40 @@ function safeString(value, fallback = '') {
     }
 
     return String(value).trim();
+}
+
+function currentCharacterReferenceWorkerName() {
+    const data = settings();
+    const editSelectValue = typeof document !== 'undefined'
+        ? safeString(document.getElementById('editWorkerid')?.value)
+        : '';
+    return safeString(
+        editSelectValue
+        || data.editWorkerid
+        || data.comfyCharacterReferenceWorkerId
+        || data.comfyAutoReferenceBootstrapWorkerId,
+    );
+}
+
+function currentWorkflowPresetName(request = null) {
+    const data = settings();
+    const bootstrapWorker = safeString(request?.stChatu8BootstrapWorkerId || currentCharacterReferenceWorkerName());
+    if (safeString(request?.mode) === 'reference_bootstrap' && bootstrapWorker) {
+        return bootstrapWorker;
+    }
+
+    if (safeString(request?.workflowPresetName)) {
+        return safeString(request.workflowPresetName);
+    }
+
+    if (typeof document !== 'undefined') {
+        const selected = safeString(document.getElementById('workerid')?.value);
+        if (selected) {
+            return selected;
+        }
+    }
+
+    return safeString(data.workerid);
 }
 
 function safeNumber(value, fallback) {
@@ -385,6 +426,8 @@ function createTrace(anchor, request, messageId, reason) {
         request_id: request?.id || '',
         mode: request?.mode || '',
         workflow_adapter: request?.workflowAdapter || '',
+        workflow_preset: currentWorkflowPresetName(request),
+        workflow_preset_actual: '',
         prompt_preview: trimTraceString(rawPrompt, 220),
         source_context: trimTraceString(request?.debugSourceContext || '', 1200),
         prompt_raw: trimTraceString(rawPrompt),
@@ -392,6 +435,9 @@ function createTrace(anchor, request, messageId, reason) {
         prompt_final: '',
         prompt_comfy: '',
         prompt_mismatch: false,
+        reference_character_name: trimTraceString(request?.referenceCharacterName || ''),
+        reference_character_source: trimTraceString(request?.referenceCharacterSource || ''),
+        reference_character_candidates: Array.isArray(request?.debugReferenceCharacterCandidates) ? request.debugReferenceCharacterCandidates.map(safeString).filter(Boolean).slice(0, 12) : [],
         reference_path: '',
         reference_image: '',
         workflow_adapter_actual: '',
@@ -410,6 +456,7 @@ function createTrace(anchor, request, messageId, reason) {
         height: request?.height,
         mode: request?.mode || '',
         workflow_adapter: request?.workflowAdapter || '',
+        workflow_preset: currentWorkflowPresetName(request),
         prompt_empty: !request?.prompt,
     }, false);
     return trace;
@@ -551,10 +598,35 @@ function captureComfyDebugForTrace(trace, response = null) {
         trace.prompt_comfy = trimTraceString(comfyPrompt);
     }
     trace.prompt_mismatch = Boolean(comfyPrompt && requestPrompt && !sameTracePrompt(comfyPrompt, requestPrompt));
-    trace.reference_path = trimTraceString(debug.referencePath || '');
-    trace.reference_image = trimTraceString(debug.referenceImageFileName || '');
+    if (debug.referencePath) {
+        trace.reference_path = trimTraceString(debug.referencePath);
+    }
+    if (debug.referenceImageFileName) {
+        trace.reference_image = trimTraceString(debug.referenceImageFileName);
+    }
     trace.workflow_adapter_actual = safeString(debug.workflowAdapter || trace.workflow_adapter || '');
+    trace.workflow_preset_actual = safeString(debug.workflowPresetName || trace.workflow_preset || currentWorkflowPresetName());
     return summarizeComfyDebug(debug);
+}
+
+function referenceFileNameFromPath(value) {
+    return safeString(value).split(/[\\/]/).filter(Boolean).pop() || '';
+}
+
+function recordReferenceBootstrapResult(trace, request) {
+    const referencePath = safeString(request?.debugReferenceBootstrap?.referencePath);
+    if (!trace || !referencePath) {
+        return;
+    }
+
+    trace.reference_path = trimTraceString(referencePath);
+    trace.reference_image = trimTraceString(referenceFileNameFromPath(referencePath));
+    traceEvent(trace, 'reference_bootstrap:bound', {
+        preset_id: request?.debugReferenceBootstrap?.presetId || '',
+        outfit_id: request?.debugReferenceBootstrap?.outfitId || '',
+        reference_path: referencePath,
+        reference_image: referenceFileNameFromPath(referencePath),
+    }, false);
 }
 
 function optimizerStepStatus(finalRequest) {
@@ -627,6 +699,11 @@ function traceSettingsSnapshot() {
         optimizer_api_profile: safeString(requestConfig.api_profile),
         optimizer_context_profile: safeString(requestConfig.context_profile),
         optimizer_fallback_to_raw: data.comfyPromptOptimizerFallbackToRaw !== false,
+        workflow_preset: currentWorkflowPresetName(),
+        reference_bootstrap_enabled: data.comfyAutoReferenceBootstrapEnabled === true,
+        reference_bootstrap_explicit_enabled: data.comfyAutoReferenceBootstrapExplicitlyEnabled === true,
+        reference_bootstrap_explicit_disabled: data.comfyAutoReferenceBootstrapExplicitlyDisabled === true || data.comfyAutoReferenceBootstrapDisabled === true,
+        reference_bootstrap_worker: currentCharacterReferenceWorkerName(),
     };
 }
 
@@ -641,6 +718,12 @@ function buildTraceDiagnostics(trace, includeComfyDebug = true) {
         protocol_version: TRACE_VERSION,
         chat_id: getCurrentChatId(),
         settings: traceSettingsSnapshot(),
+        request_facts: {
+            subject: traceSubject(trace),
+            workflow_preset: trace?.workflow_preset_actual || trace?.workflow_preset || '',
+            workflow_adapter: trace?.workflow_adapter_actual || trace?.workflow_adapter || '',
+            reference_image: trace?.reference_image || trace?.reference_path || '',
+        },
         prompt_compare: {
             source_context: trace?.source_context || '',
             raw: trace?.prompt_raw || '',
@@ -682,11 +765,41 @@ function tracePromptRewriteStatus(trace) {
     return '未记录';
 }
 
+function cleanTraceSubjectName(value) {
+    let text = safeString(value);
+    if (!text) {
+        return '';
+    }
+
+    text = cleanReferenceCharacterCandidate(text);
+    return shortHumanText(text, 80);
+}
+
+function traceSubjectFromText(value) {
+    const text = safeString(value);
+    if (!text) {
+        return '';
+    }
+
+    const patterns = [
+        /(?:^|[\s\n\r])Character\s*[:：]\s*([^\n\r]+)/i,
+        /(?:^|[\s\n\r])(?:角色|人物|当前角色|主角)\s*[:：]\s*([^\n\r]+)/i,
+        /(?:^|[\s\n\r])Subject\s*[:：]\s*([^\n\r]+)/i,
+        /(?:^|[\s\n\r])主体\s*[:：]\s*([^\n\r]+)/i,
+    ];
+    for (const pattern of patterns) {
+        const match = text.match(pattern);
+        const subject = cleanTraceSubjectName(match?.[1]);
+        if (subject) {
+            return subject;
+        }
+    }
+
+    return '';
+}
+
 function traceSubject(trace) {
-    const prompt = tracePromptText(trace);
-    const match = prompt.match(/^\s*Subject\s*:\s*([^.\n]+)/i)
-        || prompt.match(/(?:角色|人物|主体)\s*[:：]\s*([^，。,\n]+)/);
-    return shortHumanText(match?.[1] || '', 80);
+    return cleanTraceSubjectName(trace?.reference_character_name) || traceSubjectFromText(trace?.source_context) || traceSubjectFromText(tracePromptText(trace));
 }
 
 function traceErrorText(trace) {
@@ -735,10 +848,13 @@ function traceCompactMeta(trace) {
     return bits.join(' · ');
 }
 
-function traceWorkflowLabel(trace) {
+function traceWorkflowAdapterLabel(trace) {
     const actual = safeString(trace?.workflow_adapter_actual);
     const requested = safeString(trace?.workflow_adapter);
     const adapter = actual || requested;
+    if (!adapter) {
+        return '';
+    }
     if (adapter === 'generic-reference') {
         return '当前设置工作流（通用参考图补丁）';
     }
@@ -751,7 +867,11 @@ function traceWorkflowLabel(trace) {
     if (adapter === 'reference-bootstrap-worker') {
         return '角色首参考图生成工作流';
     }
-    return adapter || '默认 ComfyUI';
+    return adapter;
+}
+
+function traceWorkflowLabel(trace) {
+    return safeString(trace?.workflow_preset_actual || trace?.workflow_preset) || traceWorkflowAdapterLabel(trace) || '默认 ComfyUI';
 }
 
 function traceReadableRows(trace) {
@@ -759,6 +879,8 @@ function traceReadableRows(trace) {
     const subject = traceSubject(trace);
     const error = traceErrorText(trace);
     const reference = trace?.reference_image || trace?.reference_path || '';
+    const workflow = traceWorkflowLabel(trace);
+    const adapter = traceWorkflowAdapterLabel(trace);
     return [
         ['状态', traceReadableStatus(trace?.status)],
         ['当前步骤', step?.label || '待处理'],
@@ -770,7 +892,8 @@ function traceReadableRows(trace) {
         ['参考图', reference || '未记录'],
         ['锚点', trace?.anchor_id || '无'],
         ['模式', trace?.mode || '默认'],
-        ['工作流', traceWorkflowLabel(trace)],
+        ['工作流', workflow],
+        ...(adapter && adapter !== workflow ? [['内部适配器', adapter]] : []),
         ...(error ? [['失败原因', error]] : []),
     ].filter(([, value]) => safeString(value));
 }
@@ -864,9 +987,16 @@ function showTraceDetailDialog(trace) {
     copyPrompt.type = 'button';
     copyPrompt.textContent = '复制提示词';
     copyPrompt.disabled = !prompt;
-    copyPrompt.addEventListener('click', async () => {
-        await copyText(prompt);
-        copyPrompt.textContent = '已复制';
+    copyPrompt.addEventListener('click', async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        try {
+            await copyText(prompt);
+            copyPrompt.textContent = '已复制';
+        } catch (error) {
+            copyPrompt.textContent = '复制失败';
+            console.warn('[st-chatu8] Failed to copy trace prompt:', error);
+        }
         setTimeout(() => {
             copyPrompt.textContent = '复制提示词';
         }, 1200);
@@ -874,9 +1004,16 @@ function showTraceDetailDialog(trace) {
     const copyJson = document.createElement('button');
     copyJson.type = 'button';
     copyJson.textContent = '复制排查包';
-    copyJson.addEventListener('click', async () => {
-        await copyText(JSON.stringify(buildTraceDiagnostics(trace, true), null, 2));
-        copyJson.textContent = '已复制';
+    copyJson.addEventListener('click', async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        try {
+            await copyText(JSON.stringify(buildTraceDiagnostics(trace, true), null, 2));
+            copyJson.textContent = '已复制';
+        } catch (error) {
+            copyJson.textContent = '复制失败';
+            console.warn('[st-chatu8] Failed to copy trace diagnostics:', error);
+        }
         setTimeout(() => {
             copyJson.textContent = '复制排查包';
         }, 1200);
@@ -1001,20 +1138,28 @@ function renderTraceConsole() {
 }
 
 async function copyText(text) {
+    const value = String(text ?? '');
     if (typeof navigator !== 'undefined' && navigator?.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text);
-        return;
+        try {
+            await navigator.clipboard.writeText(value);
+            return;
+        } catch (error) {
+            console.warn('[st-chatu8] navigator.clipboard.writeText failed; falling back to execCommand:', error);
+        }
     }
 
     const textarea = document.createElement('textarea');
-    textarea.value = text;
+    textarea.value = value;
     textarea.style.position = 'fixed';
     textarea.style.opacity = '0';
     document.body.appendChild(textarea);
     textarea.focus();
     textarea.select();
-    document.execCommand('copy');
+    const copied = document.execCommand('copy');
     textarea.remove();
+    if (!copied) {
+        throw new Error('clipboard copy failed');
+    }
 }
 
 function setTemporaryTraceStatus(element, text) {
@@ -1538,6 +1683,7 @@ function ensureFloatingWorkbenchStyles() {
             background: rgba(255, 255, 255, 0.05);
             color: #edf3f7;
             cursor: pointer;
+            touch-action: manipulation;
         }
 
         .st-chatu8-trace-detail-body {
@@ -1572,11 +1718,13 @@ function ensureFloatingWorkbenchStyles() {
             box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
         }
 
-        .mes_text img.st-chatu8-generated-image {
+        .mes_text img.st-chatu8-generated-image,
+        .mes_text img[data-st-chatu8-generated="true"] {
             cursor: pointer;
         }
 
-        .mes_text .st-chatu8-generated-image-wrap {
+        .mes_text .st-chatu8-generated-image-wrap,
+        .mes_text [data-st-chatu8-result-wrap="true"] {
             position: relative;
             display: inline-block;
             max-width: 100%;
@@ -1585,7 +1733,8 @@ function ensureFloatingWorkbenchStyles() {
             --st-chatu8-result-height: 820px;
         }
 
-        .mes_text .st-chatu8-generated-image-wrap img.st-chatu8-generated-image {
+        .mes_text .st-chatu8-generated-image-wrap img.st-chatu8-generated-image,
+        .mes_text [data-st-chatu8-result-wrap="true"] > img[data-st-chatu8-generated="true"] {
             display: block;
             width: auto;
             height: auto;
@@ -1596,7 +1745,9 @@ function ensureFloatingWorkbenchStyles() {
             border-radius: 6px;
         }
 
-        .mes_text .st-chatu8-image-regenerate-btn {
+        .mes_text .st-chatu8-image-regenerate-btn,
+        .mes_text button[class*="st-chatu8-image-regenerate-btn"],
+        .mes_text button[data-st-chatu8-anchor-id][data-st-chatu8-trace-id]:not([data-st-chatu8-fold-toggle="true"]) {
             width: 30px;
             height: 30px;
             display: inline-grid;
@@ -1609,9 +1760,13 @@ function ensureFloatingWorkbenchStyles() {
             color: #dff2ff;
             line-height: 1;
             cursor: pointer;
+            pointer-events: auto;
+            touch-action: manipulation;
         }
 
-        .mes_text .st-chatu8-generated-image-wrap > .st-chatu8-image-regenerate-btn {
+        .mes_text .st-chatu8-generated-image-wrap > .st-chatu8-image-regenerate-btn,
+        .mes_text [data-st-chatu8-result-wrap="true"] > button[class*="st-chatu8-image-regenerate-btn"],
+        .mes_text [data-st-chatu8-result-wrap="true"] > button[data-st-chatu8-anchor-id][data-st-chatu8-trace-id]:not([data-st-chatu8-fold-toggle="true"]) {
             position: absolute;
             top: 8px;
             right: 8px;
@@ -1619,18 +1774,24 @@ function ensureFloatingWorkbenchStyles() {
             box-shadow: 0 6px 18px rgba(0, 0, 0, 0.32);
         }
 
-        .mes_text .st-chatu8-image-regenerate-btn:hover {
+        .mes_text .st-chatu8-image-regenerate-btn:hover,
+        .mes_text button[class*="st-chatu8-image-regenerate-btn"]:hover,
+        .mes_text button[data-st-chatu8-anchor-id][data-st-chatu8-trace-id]:not([data-st-chatu8-fold-toggle="true"]):hover {
             background: rgba(36, 112, 180, 0.92);
             border-color: rgba(157, 208, 255, 0.9);
         }
 
-        .mes_text .st-chatu8-image-regenerate-btn[disabled] {
+        .mes_text .st-chatu8-image-regenerate-btn[disabled],
+        .mes_text button[class*="st-chatu8-image-regenerate-btn"][disabled],
+        .mes_text button[data-st-chatu8-anchor-id][data-st-chatu8-trace-id][disabled] {
             cursor: wait;
             opacity: 0.95;
         }
 
         .mes_text .st-chatu8-image-regenerate-btn-running i,
-        .mes_text .st-chatu8-image-regenerate-btn[disabled] i {
+        .mes_text .st-chatu8-image-regenerate-btn[disabled] i,
+        .mes_text button[class*="st-chatu8-image-regenerate-btn-running"] i,
+        .mes_text button[class*="st-chatu8-image-regenerate-btn"][disabled] i {
             animation: stChatu8AnchorSpin 0.86s linear infinite;
         }
 
@@ -1750,7 +1911,8 @@ function ensureFloatingWorkbenchStyles() {
             white-space: nowrap;
         }
 
-        .mes_text .st-chatu8-image-fold-btn {
+        .mes_text .st-chatu8-image-fold-btn,
+        .mes_text [data-st-chatu8-result-wrap="true"] > button[class*="st-chatu8-image-fold-btn"] {
             position: absolute;
             top: 8px;
             left: 8px;
@@ -1772,12 +1934,14 @@ function ensureFloatingWorkbenchStyles() {
             box-shadow: 0 6px 18px rgba(0, 0, 0, 0.32);
         }
 
-        .mes_text .st-chatu8-image-fold-btn:hover {
+        .mes_text .st-chatu8-image-fold-btn:hover,
+        .mes_text [data-st-chatu8-result-wrap="true"] > button[class*="st-chatu8-image-fold-btn"]:hover {
             background: rgba(36, 112, 180, 0.92);
             border-color: rgba(157, 208, 255, 0.9);
         }
 
-        .mes_text .st-chatu8-generated-image-folded {
+        .mes_text .st-chatu8-generated-image-folded,
+        .mes_text [data-st-chatu8-result-wrap="true"] > button[class*="st-chatu8-generated-image-folded"] {
             display: none;
             align-items: center;
             gap: 8px;
@@ -1796,12 +1960,17 @@ function ensureFloatingWorkbenchStyles() {
         }
 
         .mes_text .st-chatu8-generated-image-wrap.is-folded > img.st-chatu8-generated-image,
+        .mes_text [data-st-chatu8-result-wrap="true"].is-folded > img[data-st-chatu8-generated="true"],
         .mes_text .st-chatu8-generated-image-wrap.is-folded > .st-chatu8-image-fold-btn,
-        .mes_text .st-chatu8-generated-image-wrap.is-folded > .st-chatu8-image-regenerate-btn {
+        .mes_text [data-st-chatu8-result-wrap="true"].is-folded > button[class*="st-chatu8-image-fold-btn"],
+        .mes_text .st-chatu8-generated-image-wrap.is-folded > .st-chatu8-image-regenerate-btn,
+        .mes_text [data-st-chatu8-result-wrap="true"].is-folded > button[class*="st-chatu8-image-regenerate-btn"],
+        .mes_text [data-st-chatu8-result-wrap="true"].is-folded > button[data-st-chatu8-anchor-id][data-st-chatu8-trace-id]:not([data-st-chatu8-fold-toggle="true"]) {
             display: none !important;
         }
 
-        .mes_text .st-chatu8-generated-image-wrap.is-folded > .st-chatu8-generated-image-folded {
+        .mes_text .st-chatu8-generated-image-wrap.is-folded > .st-chatu8-generated-image-folded,
+        .mes_text [data-st-chatu8-result-wrap="true"].is-folded > button[class*="st-chatu8-generated-image-folded"] {
             display: inline-flex;
         }
 
@@ -2195,6 +2364,290 @@ function compactPromptParts(parts) {
         .join(', ');
 }
 
+function normalizeCharacterAlias(value) {
+    return safeString(value)
+        .toLowerCase()
+        .replace(/[\u300c\u300d\u3010\u3011[\]{}()\uff08\uff09"'`]/g, ' ')
+        .replace(/[_\-]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function splitCharacterAliases(...values) {
+    const result = [];
+    const seen = new Set();
+    for (const value of values) {
+        for (const alias of safeString(value).split('|')) {
+            const text = safeString(alias);
+            const key = normalizeCharacterAlias(text);
+            if (text && key && !seen.has(key)) {
+                seen.add(key);
+                result.push(text);
+            }
+        }
+    }
+    return result;
+}
+
+function currentStCharacter() {
+    if (typeof window === 'undefined') {
+        return null;
+    }
+    const chid = window.this_chid;
+    const characters = window.characters;
+    if (characters && chid !== undefined && chid !== null && String(chid).trim() !== '') {
+        return Array.isArray(characters) ? characters[Number(chid)] : characters[chid];
+    }
+    return null;
+}
+
+function collectReferenceCharacterAliases() {
+    const records = [];
+    const seen = new Set();
+    const add = (displayName, alias, source, priority) => {
+        const text = safeString(alias);
+        const key = normalizeCharacterAlias(text);
+        if (!text || !key || seen.has(`${source}:${key}`)) {
+            return;
+        }
+        seen.add(`${source}:${key}`);
+        records.push({
+            displayName: safeString(displayName) || text,
+            alias: text,
+            key,
+            source,
+            priority,
+        });
+    };
+
+    const current = currentStCharacter();
+    const currentNames = [
+        typeof window !== 'undefined' ? window.name2 : '',
+        current?.name,
+        safeString(current?.avatar).replace(/\.[^/.\\]+$/, ''),
+    ].filter(Boolean);
+    const currentDisplay = currentNames.find(Boolean);
+    for (const name of currentNames) {
+        for (const alias of splitCharacterAliases(name)) {
+            add(currentDisplay || alias, alias, 'current_character', 0);
+        }
+    }
+
+    const presets = settings().characterPresets || {};
+    if (presets && typeof presets === 'object' && !Array.isArray(presets)) {
+        for (const [presetId, preset] of Object.entries(presets)) {
+            if (!preset) {
+                continue;
+            }
+            const display = splitCharacterAliases(preset.nameCN, preset.nameEN, presetId)[0] || presetId;
+            for (const alias of splitCharacterAliases(presetId, preset.nameCN, preset.nameEN)) {
+                add(display, alias, 'character_preset', 1);
+            }
+        }
+    }
+
+    return records.sort((left, right) => left.priority - right.priority || right.alias.length - left.alias.length);
+}
+
+function isAsciiAlias(value) {
+    return /^[A-Za-z0-9 _.'\-]+$/.test(safeString(value));
+}
+
+function isAsciiWordChar(value) {
+    return /^[A-Za-z0-9_]$/.test(value || '');
+}
+
+function findAliasIndex(text, alias) {
+    const source = safeString(text);
+    const needle = safeString(alias);
+    if (!source || !needle) {
+        return -1;
+    }
+    const lowerSource = source.toLowerCase();
+    const lowerNeedle = needle.toLowerCase();
+    let index = lowerSource.indexOf(lowerNeedle);
+    if (index < 0 || !isAsciiAlias(needle)) {
+        return index;
+    }
+    while (index >= 0) {
+        const before = lowerSource[index - 1] || '';
+        const after = lowerSource[index + lowerNeedle.length] || '';
+        if (!isAsciiWordChar(before) && !isAsciiWordChar(after)) {
+            return index;
+        }
+        index = lowerSource.indexOf(lowerNeedle, index + 1);
+    }
+    return -1;
+}
+
+function isDescriptiveCharacterFragment(value) {
+    const text = safeString(value);
+    if (!text) {
+        return true;
+    }
+    if (/^(?:female|male|woman|women|man|men|girl|girls|boy|boys|subject|character|unknown|none|n\/a)$/i.test(text)) {
+        return true;
+    }
+    return /(?:\d+\s*岁|[一二三四五六七八九十百零〇两]+\s*岁|女童|男童|少女|少年|成年|外貌|特征|身穿|穿着|服装|衣|裙|袍|衫|赤足|足踝|头发|发色|青丝|长发|短发|黑发|白发|银发|金发|蓝发|眼睛|眼眸|瞳|赤眸|紫眸|肤|身材|身段|曲线|体型|姿势|表情|背景|场景|镜头|水蓝|长裙|湿透|凌空|披散|鳞片|dress|robe|skirt|hair|eyes|body|pose|clothing|background|scene|angle)/i.test(text);
+}
+
+function cleanReferenceCharacterCandidate(value) {
+    let text = safeString(value);
+    if (!text) {
+        return '';
+    }
+    text = text.split(/\s+(?:Type|Subject|Highlight|Angle|Character|Pose\s*&\s*Action|Pose|Action|Clothing|Extra\s+Details|Environment|Scene|Background)\s*[:\uFF1A]?/i)[0];
+    text = text.replace(/\([^)]*\).*$/g, '');
+    const segments = text.split(/[\uFF0C,;\uFF1B\u3002.\n\r]/)
+        .map((segment) => segment.replace(/^(?:subject\s*[:\uFF1A]?\s*)?(?:female|male|woman|man|girl|boy)\b\s*[:\uFF1A\-]?\s*/i, '').trim())
+        .filter(Boolean);
+    text = segments.find((segment) => /[\u3400-\u9fff\uf900-\ufaff]/.test(segment) && !isDescriptiveCharacterFragment(segment) && segment.length <= 12)
+        || segments.find((segment) => !isDescriptiveCharacterFragment(segment))
+        || '';
+    text = text.replace(/^[\s:\uFF1A\-]+|[\s:\uFF1A\-]+$/g, '');
+    if (isDescriptiveCharacterFragment(text)) {
+        return '';
+    }
+    return text.length >= 2 && text.length <= 80 ? text : '';
+}
+
+function extractReferenceFieldCandidates(text) {
+    const source = safeString(text);
+    if (!source) {
+        return [];
+    }
+    const candidates = [];
+    const pattern = /(?:^|[\s\n\r])(?:Character|\u89d2\u8272|\u4eba\u7269|\u5f53\u524d\u89d2\u8272|\u4e3b\u89d2)\s*[:\uFF1A]\s*([^\n\r]+)/gi;
+    for (const match of source.matchAll(pattern)) {
+        const candidate = cleanReferenceCharacterCandidate(match[1]);
+        if (candidate) {
+            candidates.push(candidate);
+        }
+    }
+    return candidates;
+}
+
+function extractSubjectFieldCandidates(text) {
+    const source = safeString(text);
+    if (!source) {
+        return [];
+    }
+    const candidates = [];
+    const pattern = /(?:^|[\s\n\r])(?:Subject|\u4e3b\u4f53)\s*[:\uFF1A]?\s*([^\n\r]+)/gi;
+    for (const match of source.matchAll(pattern)) {
+        const candidate = cleanReferenceCharacterCandidate(match[1]);
+        if (candidate) {
+            candidates.push(candidate);
+        }
+    }
+    return candidates;
+}
+
+function findKnownCharacterInCandidate(candidate, aliases) {
+    const clean = cleanReferenceCharacterCandidate(candidate);
+    const key = normalizeCharacterAlias(clean);
+    if (!clean || !key) {
+        return null;
+    }
+    const exact = aliases.find((record) => record.key === key);
+    if (exact) {
+        return exact;
+    }
+    const contained = aliases
+        .map((record) => ({ record, index: findAliasIndex(clean, record.alias) }))
+        .filter((match) => match.index >= 0)
+        .sort((left, right) => left.index - right.index || right.record.alias.length - left.record.alias.length);
+    return contained[0]?.record || null;
+}
+
+function findKnownCharacterInText(text, aliases) {
+    const source = safeString(text);
+    if (!source) {
+        return null;
+    }
+    const matches = aliases
+        .map((record) => ({ record, index: findAliasIndex(source, record.alias) }))
+        .filter((match) => match.index >= 0)
+        .sort((left, right) => left.index - right.index || left.record.priority - right.record.priority || right.record.alias.length - left.record.alias.length);
+    return matches[0]?.record || null;
+}
+
+function isLooseCharacterNameCandidate(value) {
+    const text = cleanReferenceCharacterCandidate(value);
+    if (!text) {
+        return false;
+    }
+    if (isDescriptiveCharacterFragment(text)) {
+        return false;
+    }
+    if (/[\u3400-\u9fff\uf900-\ufaff]/.test(text)) {
+        if (text.length > 12 || /\s/.test(text)) {
+            return false;
+        }
+        return !/[\u8eab\u8eaf\u6bdb\u6bef\u8737\u7761\u8eba\u5367\u5750\u7ad9\u770b\u7b11\u54ed\u9886\u53e3\u540e\u9888\u9501\u9aa8\u8170\u81c0\u80f8\u817f\u624b\u6307\u59ff\u52bf\u8868\u60c5\u80cc\u666f\u573a\u666f\u8f66\u53a2\u623f\u95f4]/.test(text);
+    }
+    return /^[A-Za-z][A-Za-z0-9 .'\-]{1,48}$/.test(text) && text.split(/\s+/).length <= 4;
+}
+
+function resolveReferenceCharacterForImageAnchor(prompt, context) {
+    const sourceText = [prompt, context].map(safeString).filter(Boolean).join('\n');
+    const aliases = collectReferenceCharacterAliases();
+    const explicitCandidates = extractReferenceFieldCandidates(sourceText);
+    const subjectCandidates = extractSubjectFieldCandidates(sourceText);
+
+    for (const candidate of explicitCandidates) {
+        const known = findKnownCharacterInCandidate(candidate, aliases);
+        if (known) {
+            return {
+                name: known.displayName,
+                source: `${known.source}:character_field`,
+                candidates: explicitCandidates,
+            };
+        }
+    }
+
+    const knownInText = findKnownCharacterInText(sourceText, aliases);
+    if (knownInText) {
+        return {
+            name: knownInText.displayName,
+            source: `${knownInText.source}:text_match`,
+            candidates: [...explicitCandidates, ...subjectCandidates],
+        };
+    }
+
+    for (const candidate of subjectCandidates) {
+        const known = findKnownCharacterInCandidate(candidate, aliases);
+        if (known) {
+            return {
+                name: known.displayName,
+                source: `${known.source}:subject_field`,
+                candidates: subjectCandidates,
+            };
+        }
+    }
+
+    for (const candidate of explicitCandidates) {
+        if (isLooseCharacterNameCandidate(candidate)) {
+            return {
+                name: cleanReferenceCharacterCandidate(candidate),
+                source: 'explicit_character_field',
+                candidates: explicitCandidates,
+            };
+        }
+    }
+
+    const current = aliases.find((record) => record.source === 'current_character');
+    return current ? {
+        name: current.displayName,
+        source: 'current_character:fallback',
+        candidates: [...explicitCandidates, ...subjectCandidates],
+    } : {
+        name: '',
+        source: 'unresolved',
+        candidates: [...explicitCandidates, ...subjectCandidates],
+    };
+}
+
 function buildRequest(anchor, messageId) {
     const data = anchor.data;
     const mode = safeString(data.mode, 'normal');
@@ -2204,6 +2657,7 @@ function buildRequest(anchor, messageId) {
     if (anchor.type === 'image_text') {
         const prompt = safeString(data.prompt);
         const seed = numberOrUndefined(data.seed);
+        const referenceCharacter = resolveReferenceCharacterForImageAnchor(prompt, data.context);
         return {
             id: `chatu8_anchor:${messageId}:${anchor.id}:${Date.now()}`,
             prompt,
@@ -2214,8 +2668,13 @@ function buildRequest(anchor, messageId) {
             seed,
             mode: modeDefaults.label,
             workflowAdapter: 'flux2-klein-reference',
+            workflowPresetName: currentWorkflowPresetName(),
             debugPromptRaw: prompt,
             debugSourceContext: safeString(data.context),
+            debugFramePrompt: prompt,
+            referenceCharacterName: referenceCharacter.name,
+            referenceCharacterSource: referenceCharacter.source,
+            debugReferenceCharacterCandidates: referenceCharacter.candidates,
         };
     }
 
@@ -2242,6 +2701,7 @@ function buildRequest(anchor, messageId) {
         negative_prompt: negativePrompt,
         seed,
         mode: modeDefaults.label,
+        workflowPresetName: currentWorkflowPresetName(),
         debugSourceContext: safeString(data.context),
     };
 }
@@ -2503,15 +2963,29 @@ function hydrateGeneratedImages(root = document) {
         return;
     }
 
-    if (root.matches?.('img.st-chatu8-generated-image[data-st-chatu8-image-ref]')) {
+    if (root.matches?.(GENERATED_IMAGE_REF_SELECTOR)) {
         hydrateGeneratedImageNode(root);
     }
 
-    root.querySelectorAll?.('img.st-chatu8-generated-image[data-st-chatu8-image-ref]').forEach((image) => {
+    root.querySelectorAll?.(GENERATED_IMAGE_REF_SELECTOR).forEach((image) => {
         hydrateGeneratedImageNode(image);
     });
 
     ensureGeneratedImageFoldControls(root);
+}
+
+function elementClassContains(element, token) {
+    return Array.from(element?.classList || []).some((className) => className === token || className.includes(token));
+}
+
+function isGeneratedImageFoldButton(element) {
+    return element?.matches?.('button[data-st-chatu8-fold-toggle="true"]')
+        && elementClassContains(element, 'st-chatu8-image-fold-btn');
+}
+
+function isGeneratedImageFoldedButton(element) {
+    return element?.matches?.('button[data-st-chatu8-fold-toggle="true"]')
+        && elementClassContains(element, 'st-chatu8-generated-image-folded');
 }
 
 function createGeneratedImageFoldButton() {
@@ -2540,21 +3014,21 @@ function ensureGeneratedImageFoldControls(root = document) {
     }
 
     const wrappers = [];
-    if (root.matches?.('.st-chatu8-generated-image-wrap[data-st-chatu8-result-wrap]')) {
+    if (root.matches?.(GENERATED_IMAGE_WRAPPER_SELECTOR)) {
         wrappers.push(root);
     }
-    const closestWrapper = root.closest?.('.st-chatu8-generated-image-wrap[data-st-chatu8-result-wrap]');
+    const closestWrapper = root.closest?.(GENERATED_IMAGE_WRAPPER_SELECTOR);
     if (closestWrapper) {
         wrappers.push(closestWrapper);
     }
-    root.querySelectorAll?.('.st-chatu8-generated-image-wrap[data-st-chatu8-result-wrap]').forEach((wrapper) => wrappers.push(wrapper));
+    root.querySelectorAll?.(GENERATED_IMAGE_WRAPPER_SELECTOR).forEach((wrapper) => wrappers.push(wrapper));
 
     for (const wrapper of Array.from(new Set(wrappers))) {
         const children = Array.from(wrapper.children || []);
-        if (!children.some((child) => child.classList?.contains('st-chatu8-image-fold-btn'))) {
+        if (!children.some(isGeneratedImageFoldButton)) {
             wrapper.insertBefore(createGeneratedImageFoldButton(), wrapper.firstChild);
         }
-        if (!children.some((child) => child.classList?.contains('st-chatu8-generated-image-folded'))) {
+        if (!children.some(isGeneratedImageFoldedButton)) {
             wrapper.appendChild(createGeneratedImageFoldedButton());
         }
         wrapper.dataset.stChatu8Foldable = 'true';
@@ -2562,14 +3036,14 @@ function ensureGeneratedImageFoldControls(root = document) {
 }
 
 function toggleGeneratedImageFold(target) {
-    const wrapper = target?.closest?.('.st-chatu8-generated-image-wrap[data-st-chatu8-result-wrap]');
+    const wrapper = target?.closest?.(GENERATED_IMAGE_WRAPPER_SELECTOR);
     if (!wrapper) {
         return false;
     }
 
     const shouldFold = !wrapper.classList.contains('is-folded');
     wrapper.classList.toggle('is-folded', shouldFold);
-    const foldButton = Array.from(wrapper.children || []).find((child) => child.classList?.contains('st-chatu8-image-fold-btn'));
+    const foldButton = Array.from(wrapper.children || []).find(isGeneratedImageFoldButton);
     if (foldButton) {
         foldButton.title = shouldFold ? '展开图片' : '折叠图片';
         foldButton.innerHTML = shouldFold
@@ -2601,29 +3075,57 @@ function bindGeneratedImageHydration() {
 function buildErrorReplacement(anchor, error, trace = null) {
     const message = error instanceof Error ? error.message : String(error);
     const traceId = safeString(trace?.trace_id || '');
+    const anchorPrompt = safeString(anchor?.data?.prompt || anchor?.raw)
+        .replace(new RegExp(`^${escapeRegExp(IMAGE_TEXT_OPEN)}|${escapeRegExp(IMAGE_TEXT_CLOSE)}$`, 'g'), '');
+    const retryPrompt = safeString(trace?.prompt_raw || tracePromptText(trace) || anchorPrompt).slice(0, ERROR_RETRY_PROMPT_LIMIT);
+    const retryContext = safeString(trace?.source_context || anchor?.data?.context || anchor?.data?.source_context).slice(0, TRACE_DETAIL_STRING_LIMIT);
+    const retryMode = safeString(traceRequestDetail(trace, 'mode') || trace?.mode || anchor?.data?.mode);
+    const retryWidth = numberOrUndefined(traceRequestDetail(trace, 'width') ?? anchor?.data?.width);
+    const retryHeight = numberOrUndefined(traceRequestDetail(trace, 'height') ?? anchor?.data?.height);
     const metadata = {
         id: anchor.id,
         trace_id: traceId,
         error: message.slice(0, 500),
         failed_at: new Date().toISOString(),
     };
+    if (retryPrompt) metadata.prompt = retryPrompt;
+    if (retryContext) metadata.source_context = retryContext;
+    if (retryMode) metadata.mode = retryMode;
+    if (retryWidth !== undefined) metadata.width = retryWidth;
+    if (retryHeight !== undefined) metadata.height = retryHeight;
     const marker = `<!--${ERROR_PREFIX}:${safeCommentJson(metadata)}-->`;
 
     if (settings().chatu8HiddenJsonShowFailures === false) {
         return marker;
     }
 
+    const retryAttrs = [
+        retryPrompt ? `data-st-chatu8-prompt="${escapeHtml(retryPrompt)}"` : '',
+        retryContext ? `data-st-chatu8-source-context="${escapeHtml(retryContext)}"` : '',
+        retryMode ? `data-st-chatu8-mode="${escapeHtml(retryMode)}"` : '',
+        retryWidth !== undefined ? `data-st-chatu8-width="${escapeHtml(retryWidth)}"` : '',
+        retryHeight !== undefined ? `data-st-chatu8-height="${escapeHtml(retryHeight)}"` : '',
+    ].filter(Boolean);
     const buttonAttrs = [
         'class="st-chatu8-image-regenerate-btn st-chatu8-image-regenerate-btn-error"',
         'type="button"',
         `title="重新生成。失败详情：${escapeHtml(message)}"`,
         `data-st-chatu8-anchor-id="${escapeHtml(anchor.id)}"`,
         `data-st-chatu8-trace-id="${escapeHtml(traceId)}"`,
+        ...retryAttrs,
+    ].join(' ');
+    const placeholderAttrs = [
+        'class="st-chatu8-image-error-placeholder"',
+        'data-st-chatu8-error-compact="true"',
+        `data-st-chatu8-anchor-id="${escapeHtml(anchor.id)}"`,
+        `data-st-chatu8-trace-id="${escapeHtml(traceId)}"`,
+        `title="${escapeHtml(message)}"`,
+        ...retryAttrs,
     ].join(' ');
     return [
         marker,
         '',
-        `<span class="st-chatu8-image-error-placeholder" data-st-chatu8-error-compact="true" data-st-chatu8-anchor-id="${escapeHtml(anchor.id)}" data-st-chatu8-trace-id="${escapeHtml(traceId)}" title="${escapeHtml(message)}">`,
+        `<span ${placeholderAttrs}>`,
         `<button ${buttonAttrs}><i class="fa-solid fa-rotate-right"></i></button>`,
         '图片生成失败，点击重试',
         '</span>',
@@ -2828,16 +3330,19 @@ function cleanupLegacyAnchorMarkup(text, messageId = 0) {
     return result;
 }
 
-function findPlaceholderRange(source, anchor, trace = null) {
+function findPlaceholderRange(source, anchor, trace = null, options = {}) {
     const text = safeString(source);
     const wantedId = safeString(anchor?.id);
     const wantedTraceId = safeString(trace?.trace_id);
+    let idOnlyRange = null;
+    let onlyRange = null;
+    let rangeCount = 0;
     let cursor = 0;
 
     while (cursor < text.length) {
         const start = text.indexOf(`<!--${PLACEHOLDER_PREFIX}:`, cursor);
         if (start === -1) {
-            return null;
+            break;
         }
 
         const startEnd = text.indexOf('-->', start);
@@ -2855,24 +3360,49 @@ function findPlaceholderRange(source, anchor, trace = null) {
 
         const idMatches = !wantedId || metadata?.id === wantedId;
         const traceMatches = !wantedTraceId || !metadata?.trace_id || metadata.trace_id === wantedTraceId;
+        let blockRange = null;
         if (idMatches && traceMatches) {
             const endStart = text.indexOf(`<!--${PLACEHOLDER_END_PREFIX}:`, startEnd + 3);
             if (endStart !== -1) {
                 const endEnd = text.indexOf('-->', endStart);
                 if (endEnd !== -1) {
-                    return { start, end: endEnd + 3 };
+                    blockRange = { start, end: endEnd + 3 };
+                    return blockRange;
                 }
+            }
+        }
+        if (!blockRange) {
+            const endStart = text.indexOf(`<!--${PLACEHOLDER_END_PREFIX}:`, startEnd + 3);
+            if (endStart !== -1) {
+                const endEnd = text.indexOf('-->', endStart);
+                if (endEnd !== -1) {
+                    blockRange = { start, end: endEnd + 3 };
+                }
+            }
+        }
+        if (blockRange) {
+            rangeCount += 1;
+            onlyRange = blockRange;
+            if (idMatches && !idOnlyRange) {
+                idOnlyRange = blockRange;
             }
         }
 
         cursor = startEnd + 3;
     }
 
+    if (options.allowTraceMismatch && idOnlyRange) {
+        return idOnlyRange;
+    }
+    if (options.allowSinglePlaceholderFallback && rangeCount === 1 && onlyRange) {
+        return onlyRange;
+    }
+
     return null;
 }
 
-function replacePersistedPlaceholder(source, anchor, replacement, trace = null) {
-    const range = findPlaceholderRange(source, anchor, trace);
+function replacePersistedPlaceholder(source, anchor, replacement, trace = null, options = {}) {
+    const range = findPlaceholderRange(source, anchor, trace, options);
     if (!range) {
         return null;
     }
@@ -3093,23 +3623,32 @@ function traceRequestDetail(trace, key) {
 }
 
 function regenerateAnchorFromImage(image, trace) {
-    const prompt = safeString(trace?.prompt_raw || trace?.prompt_preview || trace?.prompt_final || trace?.prompt_optimized || trace?.prompt_comfy);
+    const errorBox = image?.closest?.('.st-chatu8-image-error-placeholder, .custom-st-chatu8-image-error-placeholder, [data-st-chatu8-error-compact="true"]');
+    const prompt = safeString(
+        trace?.prompt_raw
+        || trace?.prompt_preview
+        || trace?.prompt_final
+        || trace?.prompt_optimized
+        || trace?.prompt_comfy
+        || image?.dataset?.stChatu8Prompt
+        || errorBox?.dataset?.stChatu8Prompt,
+    );
     if (!prompt) {
         return null;
     }
 
-    const anchorId = safeString(image?.dataset?.stChatu8AnchorId || trace?.anchor_id, `image_regen_${stableHash(prompt)}`);
+    const anchorId = safeString(image?.dataset?.stChatu8AnchorId || errorBox?.dataset?.stChatu8AnchorId || trace?.anchor_id, `image_regen_${stableHash(prompt)}`);
     return {
         id: anchorId,
         type: trace?.anchor_type || 'image_text',
         data: {
             id: anchorId,
             prompt,
-            context: safeString(trace?.source_context),
+            context: safeString(trace?.source_context || image?.dataset?.stChatu8SourceContext || errorBox?.dataset?.stChatu8SourceContext),
             source: 'image_regenerate',
-            mode: safeString(traceRequestDetail(trace, 'mode') || trace?.mode, 'normal'),
-            width: numberOrUndefined(traceRequestDetail(trace, 'width')),
-            height: numberOrUndefined(traceRequestDetail(trace, 'height')),
+            mode: safeString(traceRequestDetail(trace, 'mode') || trace?.mode || image?.dataset?.stChatu8Mode || errorBox?.dataset?.stChatu8Mode, 'normal'),
+            width: numberOrUndefined(traceRequestDetail(trace, 'width') ?? image?.dataset?.stChatu8Width ?? errorBox?.dataset?.stChatu8Width),
+            height: numberOrUndefined(traceRequestDetail(trace, 'height') ?? image?.dataset?.stChatu8Height ?? errorBox?.dataset?.stChatu8Height),
         },
         raw: `${IMAGE_TEXT_OPEN}${prompt}${IMAGE_TEXT_CLOSE}`,
         start: 0,
@@ -3118,7 +3657,7 @@ function regenerateAnchorFromImage(image, trace) {
 }
 
 function generatedImageSelector(image) {
-    const wrapper = image?.closest?.('.st-chatu8-generated-image-wrap[data-st-chatu8-result-wrap]');
+    const wrapper = image?.closest?.(GENERATED_IMAGE_WRAPPER_SELECTOR);
     const wrapperRequestId = safeString(wrapper?.dataset?.stChatu8RequestId);
     if (wrapperRequestId) {
         return `<span\\b(?=[^>]*\\bdata-st-chatu8-result-wrap="true")(?=[^>]*\\bdata-st-chatu8-request-id="${escapeRegExp(wrapperRequestId)}")[\\s\\S]*?<\\/span>`;
@@ -3129,7 +3668,7 @@ function generatedImageSelector(image) {
         return `<span\\b(?=[^>]*\\bdata-st-chatu8-result-wrap="true")(?=[^>]*\\bdata-st-chatu8-trace-id="${escapeRegExp(wrapperTraceId)}")[\\s\\S]*?<\\/span>`;
     }
 
-    const errorBox = image?.closest?.('.st-chatu8-image-error-placeholder');
+    const errorBox = image?.closest?.('.st-chatu8-image-error-placeholder, .custom-st-chatu8-image-error-placeholder, [data-st-chatu8-error-compact="true"]');
     const errorTraceId = safeString(errorBox?.dataset?.stChatu8TraceId);
     if (errorTraceId) {
         return `<(?:div|span)\\b(?=[^>]*\\bclass="[^"]*st-chatu8-image-error-placeholder)(?=[^>]*\\bdata-st-chatu8-trace-id="${escapeRegExp(errorTraceId)}")[\\s\\S]*?<\\/(?:div|span)>`;
@@ -3220,7 +3759,9 @@ async function regenerateGeneratedImage(image) {
             message,
             trace: newTrace,
             traceStep,
+            traceEvent,
         });
+        recordReferenceBootstrapResult(newTrace, referenceReadyRequest);
         traceStep(newTrace, 'optimize', 'running', {
             request_type: settings().comfyPromptOptimizerRequestType || KLEIN_PROMPT_OPTIMIZER_REQUEST_TYPE,
             mode: settings().comfyPromptOptimizerMode || 'append',
@@ -3237,8 +3778,11 @@ async function regenerateGeneratedImage(image) {
         });
         traceStep(newTrace, 'workflow', 'done', {
             workflow_adapter: finalRequest?.workflowAdapter || '',
+            workflow_preset: currentWorkflowPresetName(finalRequest),
             route: finalRequest?.workflowAdapter === 'flux2-klein-reference' ? 'Klein reference workflow' : 'default ComfyUI workflow',
             reference_matching: finalRequest?.workflowAdapter === 'flux2-klein-reference' ? 'handled by ComfyUI reference route' : '',
+            reference_bootstrap: finalRequest?.debugReferenceBootstrap?.referencePath ? 'bound' : '',
+            reference_bootstrap_path: finalRequest?.debugReferenceBootstrap?.referencePath || '',
         });
 
         const response = await runComfyRequest(finalRequest, newTrace);
@@ -3328,7 +3872,7 @@ function bindGeneratedImagePromptViewer() {
     document.documentElement.dataset.stChatu8ImagePromptViewer = TRACE_VERSION;
     let longPressTimer = null;
     let longPressTarget = null;
-    const findImage = (target) => target?.closest?.('img.st-chatu8-generated-image, .mes_text img');
+    const findImage = (target) => target?.closest?.('img[data-st-chatu8-generated="true"], img.st-chatu8-generated-image, .mes_text img');
     const clearLongPress = () => {
         if (longPressTimer) {
             clearTimeout(longPressTimer);
@@ -3344,9 +3888,27 @@ function bindGeneratedImagePromptViewer() {
         showImagePromptDialog(prompt, trace);
         return true;
     };
+    const handleRegenerateButtonEvent = (event) => {
+        if (event.type === 'click' && (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)) {
+            return false;
+        }
+
+        const button = event.target?.closest?.(GENERATED_IMAGE_REGENERATE_BUTTON_SELECTOR);
+        if (!button || !button.closest?.('.mes[mesid]')) {
+            return false;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation?.();
+        regenerateGeneratedImage(button).catch((error) => {
+            console.warn('[st-chatu8] Failed to regenerate generated image:', error);
+        });
+        return true;
+    };
 
     document.addEventListener('click', (event) => {
-        if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+        if (handleRegenerateButtonEvent(event)) {
             return;
         }
 
@@ -3356,18 +3918,14 @@ function bindGeneratedImagePromptViewer() {
             event.stopPropagation();
             return;
         }
-
-        const button = event.target?.closest?.('.st-chatu8-image-regenerate-btn:not([disabled])');
-        if (!button) {
+    }, true);
+    document.addEventListener('pointerup', (event) => {
+        if (event.pointerType === 'mouse') {
             return;
         }
-
-        event.preventDefault();
-        event.stopPropagation();
-        regenerateGeneratedImage(button).catch((error) => {
-            console.warn('[st-chatu8] Failed to regenerate generated image:', error);
-        });
+        handleRegenerateButtonEvent(event);
     }, true);
+    document.addEventListener('touchend', handleRegenerateButtonEvent, { passive: false, capture: true });
     document.addEventListener('contextmenu', (event) => {
         const image = findImage(event.target);
         if (!image || !openForImage(image)) {
@@ -3435,6 +3993,7 @@ function runComfyRequest(payload, trace = null) {
             width: payload.width,
             height: payload.height,
             mode: payload.mode,
+            reference_path: payload.comfyuicankaotupian || payload.referenceImage || payload.comfyui_reference_image || '',
         });
         traceStep(trace, 'submit', 'done', { request_id: payload.id });
         traceStep(trace, 'wait', 'running', { timeout_ms: DEFAULT_TIMEOUT_MS });
@@ -3536,6 +4095,17 @@ function replaceAnchorTextForWriteback(message, anchor, replacement, status, tra
         };
     }
 
+    const loosePlaceholderReplaced = replacePersistedPlaceholder(originalText, anchor, replacement, trace, {
+        allowTraceMismatch: true,
+        allowSinglePlaceholderFallback: true,
+    });
+    if (loosePlaceholderReplaced !== null) {
+        return {
+            text: loosePlaceholderReplaced,
+            method: 'persisted_placeholder_loose',
+        };
+    }
+
     const sourceReplaced = replaceAnchorSourceText(message, anchor, replacement);
     if (sourceReplaced.text !== originalText) {
         return sourceReplaced;
@@ -3543,8 +4113,8 @@ function replaceAnchorTextForWriteback(message, anchor, replacement, status, tra
 
     if (status === 'done' && anchor?.type !== 'image_text') {
         return {
-            text: `${originalText.trimEnd()}\n\n${replacement}`,
-            method: 'append_fallback',
+            text: originalText,
+            method: 'append_fallback_blocked',
         };
     }
 
@@ -3568,6 +4138,7 @@ async function replaceAnchorInMessage(messageId, anchor, replacement, status, tr
             message_id: messageId,
             anchor_id: anchor?.id || '',
             status,
+            method: writeback.method,
         });
         await rerenderMessage(messageId, { emitUpdate: false });
         return;
@@ -3656,7 +4227,9 @@ async function processMessage(messageId, reason = 'event') {
                     message,
                     trace,
                     traceStep,
+                    traceEvent,
                 });
+                recordReferenceBootstrapResult(trace, referenceReadyRequest);
                 traceStep(trace, 'optimize', 'running', {
                     request_type: settings().comfyPromptOptimizerRequestType || KLEIN_PROMPT_OPTIMIZER_REQUEST_TYPE,
                     mode: settings().comfyPromptOptimizerMode || 'append',
@@ -3673,8 +4246,11 @@ async function processMessage(messageId, reason = 'event') {
                 });
                 traceStep(trace, 'workflow', 'done', {
                     workflow_adapter: finalRequest?.workflowAdapter || '',
+                    workflow_preset: currentWorkflowPresetName(finalRequest),
                     route: finalRequest?.workflowAdapter === 'flux2-klein-reference' ? 'Klein reference workflow' : 'default ComfyUI workflow',
                     reference_matching: finalRequest?.workflowAdapter === 'flux2-klein-reference' ? 'handled by ComfyUI reference route' : '',
+                    reference_bootstrap: finalRequest?.debugReferenceBootstrap?.referencePath ? 'bound' : '',
+                    reference_bootstrap_path: finalRequest?.debugReferenceBootstrap?.referencePath || '',
                 });
 
                 const response = await runComfyRequest(finalRequest, trace);

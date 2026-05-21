@@ -71,6 +71,7 @@
 /* Center generated image results in chat messages. */
 .mes_text .st-chatu8-image-container,
 .mes_text .st-chatu8-generated-image-wrap,
+.mes_text [data-st-chatu8-result-wrap="true"],
 .mes_text .st-chatu8-image-result,
 .mes_text .chatu8-image-result,
 .mes_text [data-image-request-id] {
@@ -82,6 +83,8 @@
 
 .mes_text .st-chatu8-image-container img,
 .mes_text .st-chatu8-generated-image-wrap img,
+.mes_text [data-st-chatu8-result-wrap="true"] img,
+.mes_text img[data-st-chatu8-generated="true"],
 .mes_text .st-chatu8-image-result img,
 .mes_text .chatu8-image-result img,
 .mes_text [data-image-request-id] img,

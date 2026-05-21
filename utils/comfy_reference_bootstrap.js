@@ -5,15 +5,18 @@ import { loadWorldInfo, METADATA_KEY as WORLD_INFO_METADATA_KEY, selected_world_
 import { EventType, extensionName } from './config.js';
 import { resolveComfyCharacterReferences } from './characterprompt.js';
 import { executeTypedLLMRequest } from './settings/llmService.js';
+import { extractCharacterAndOutfitTags } from './newline_fix.js';
 
-const BOOTSTRAP_VERSION = '20260519_mobile_reference_bootstrap_guard_v1';
-const BOOTSTRAP_REQUEST_TYPE = 'character_reference_bootstrap';
+const BOOTSTRAP_VERSION = '20260521_reference_binding_identity_v1';
+const BOOTSTRAP_REQUEST_TYPE = 'char_design';
+const BOOTSTRAP_TRANSLATE_REQUEST_TYPE = 'translation';
 const BOOTSTRAP_WORKER_SELECT_ID = 'comfyAutoReferenceBootstrapWorkerId';
 const BOOTSTRAP_TIMEOUT_MS = 8 * 60 * 1000;
 const AUTO_REFERENCE_DIR = 'D:\\jiuguan\\角色';
 const AUTO_REFERENCE_SAVE_ENDPOINT = '/api/plugins/st-chatu8/save-reference-image';
 
 let activeDialogPromise = null;
+const bootstrapSessionByCharacter = new Map();
 
 function asString(value, fallback = '') {
     const text = value == null ? '' : String(value).trim();
@@ -27,19 +30,15 @@ function settings() {
     return extension_settings[extensionName];
 }
 
+function isAutoReferenceBootstrapExplicitlyDisabled(data = settings()) {
+    return data.comfyAutoReferenceBootstrapExplicitlyDisabled === true || data.comfyAutoReferenceBootstrapDisabled === true;
+}
+
 function isAutoReferenceBootstrapEnabled(data = settings()) {
-    if (data.comfyAutoReferenceBootstrapEnabled !== true) {
+    if (isAutoReferenceBootstrapExplicitlyDisabled(data)) {
         return false;
     }
-    if (data.comfyAutoReferenceBootstrapExplicitlyEnabled === true) {
-        return true;
-    }
-    if (data.comfyAutoReferenceBootstrapMigratedOffVersion !== BOOTSTRAP_VERSION) {
-        data.comfyAutoReferenceBootstrapEnabled = false;
-        data.comfyAutoReferenceBootstrapMigratedOffVersion = BOOTSTRAP_VERSION;
-        saveSettingsDebounced();
-    }
-    return false;
+    return data.comfyAutoReferenceBootstrapEnabled === true || data.comfyAutoReferenceBootstrapExplicitlyEnabled === true;
 }
 
 function comfyWorkers() {
@@ -47,15 +46,230 @@ function comfyWorkers() {
     return workers && typeof workers === 'object' && !Array.isArray(workers) ? workers : {};
 }
 
+function characterReferenceWorkerIdFromSettings() {
+    const data = settings();
+    const editSelectValue = typeof document !== 'undefined'
+        ? asString(document.getElementById('editWorkerid')?.value)
+        : '';
+    return asString(
+        editSelectValue
+        || data.editWorkerid
+        || data.comfyCharacterReferenceWorkerId
+        || data.comfyAutoReferenceBootstrapWorkerId,
+    );
+}
+
+function setCharacterReferenceWorkerId(workerId) {
+    const data = settings();
+    data.editWorkerid = workerId;
+    data.comfyCharacterReferenceWorkerId = workerId;
+    data.comfyAutoReferenceBootstrapWorkerId = workerId;
+    const editSelect = typeof document !== 'undefined' ? document.getElementById('editWorkerid') : null;
+    if (editSelect && editSelect.value !== workerId) {
+        editSelect.value = workerId;
+    }
+}
+
 function bootstrapWorkerId() {
-    const workerId = asString(settings().comfyAutoReferenceBootstrapWorkerId);
+    const workerId = characterReferenceWorkerIdFromSettings();
     return workerId && Object.prototype.hasOwnProperty.call(comfyWorkers(), workerId) ? workerId : '';
 }
+
+function normalizeBootstrapRequestType(value, fallback) {
+    const type = asString(value);
+    if (!type || type === 'character_reference_bootstrap') {
+        return fallback;
+    }
+    return type;
+}
+
+function bootstrapGenerateRequestType() {
+    return normalizeBootstrapRequestType(settings().comfyAutoReferenceBootstrapRequestType, BOOTSTRAP_REQUEST_TYPE);
+}
+
+function bootstrapTranslateRequestType() {
+    return normalizeBootstrapRequestType(
+        settings().comfyAutoReferenceBootstrapTranslateRequestType || settings().comfyAutoReferenceBootstrapRequestType,
+        BOOTSTRAP_TRANSLATE_REQUEST_TYPE,
+    );
+}
+
+function characterReferenceSystemPrompt() {
+    const data = settings();
+    const input = typeof document !== 'undefined'
+        ? document.getElementById('st_chatu8_character_reference_system_prompt')
+        : null;
+    return asString(
+        input?.value ||
+        data.characterReferenceSystemPrompt ||
+        data.comfyCharacterReferenceSystemPrompt ||
+        data.comfyAutoReferenceBootstrapSystemPrompt,
+    );
+}
+
+function selectedBootstrapWorkflowText() {
+    const data = settings();
+    const workerId = characterReferenceWorkerIdFromSettings();
+    return asString(
+        data.workers?.[workerId]
+        || data.editWorker
+        || data.comfyCharacterReferenceWorker
+        || '',
+    );
+}
+
+function collectWorkflowModelHints(value) {
+    const hints = [];
+    const visit = (item, key = '') => {
+        if (item == null || hints.length > 80) {
+            return;
+        }
+        if (typeof item === 'string') {
+            if (/^(?:ckpt_name|model_name|unet_name|clip_name|vae_name|ipadapter_file|lora_name)$/i.test(key) || /\.(?:safetensors|ckpt|gguf|pt)$/i.test(item)) {
+                hints.push(item);
+            }
+            return;
+        }
+        if (Array.isArray(item)) {
+            item.forEach((child) => visit(child, key));
+            return;
+        }
+        if (typeof item === 'object') {
+            for (const [childKey, child] of Object.entries(item)) {
+                visit(child, childKey);
+            }
+        }
+    };
+    const text = asString(value);
+    try {
+        visit(JSON.parse(text));
+    } catch {
+        for (const match of text.matchAll(/"(?:ckpt_name|model_name|unet_name|clip_name|vae_name|ipadapter_file|lora_name)"\s*:\s*"([^"]+)"/gi)) {
+            hints.push(match[1]);
+        }
+    }
+    return uniqueStrings(hints).slice(0, 24);
+}
+
+function referencePromptModelProfile() {
+    const hints = collectWorkflowModelHints(selectedBootstrapWorkflowText());
+    const joined = hints.join(' ').toLowerCase();
+    if (/oneobsession|one obsession|illustrious|noob|wai|ponyxl/.test(joined)) {
+        return {
+            family: 'illustrious',
+            name: hints.find((item) => /oneobsession|one obsession/i.test(item)) || hints.find((item) => /illustrious|noob|wai|pony/i.test(item)) || 'Illustrious/NoobAI style SDXL model',
+            hints,
+            instruction: [
+                '当前首参考图工作流是 One Obsession / Illustrious / NoobAI 系模型，不是 Anima。',
+                '使用英文 Danbooru tag 为主，允许少量短自然语言补充；不要写长段摄影式自然语言。',
+                '正向开头使用：masterpiece, best quality, amazing quality, very awa, very aesthetic, newest, safe, 1girl, solo。',
+                '角色参考图需要：full body, standing, front view, looking at viewer, neutral expression, arms relaxed, character reference sheet, plain white background。',
+                '人物、发色、眼睛、体型、服装、材质、颜色、配饰都拆成逗号 tag；不要只写衣服名。',
+                '避免 photorealistic/photo/realistic，除非用户明确要半写实；避免剧情场景、床、马车、火炉、暧昧氛围、镜头角度。',
+                '末尾可加：absurdres, highres。',
+            ].join('\n'),
+        };
+    }
+    if (/anima/.test(joined)) {
+        return {
+            family: 'anima',
+            name: hints.find((item) => /anima/i.test(item)) || 'Anima',
+            hints,
+            instruction: [
+                '当前首参考图工作流是 Anima 系模型。',
+                '使用动漫/插画 tag，避免写实/照片级真实感。',
+                '正向可使用：masterpiece, best quality, score_7, safe, 1girl, solo。',
+            ].join('\n'),
+        };
+    }
+    if (/flux|klein|qwen/.test(joined)) {
+        return {
+            family: 'natural_language',
+            name: hints.find((item) => /flux|klein|qwen/i.test(item)) || 'natural language image model',
+            hints,
+            instruction: [
+                '当前首参考图工作流更偏自然语言模型。',
+                '使用简洁英文自然语言描述角色设定图，不要堆 Stable Diffusion 质量 tag。',
+                '描述正面全身、站姿、五官、发色、服装、材质、颜色和干净背景。',
+            ].join('\n'),
+        };
+    }
+    return {
+        family: 'sdxl',
+        name: hints[0] || 'unknown SDXL workflow',
+        hints,
+        instruction: [
+            '当前首参考图工作流未识别出明确模型族，默认按 SDXL tag prompt 处理。',
+            '使用英文逗号 tag，质量词、主体数量、角色特征、服装、构图依次排列。',
+        ].join('\n'),
+    };
+}
+
+function referencePromptModelProfileText() {
+    const profile = referencePromptModelProfile();
+    return [
+        `当前 ComfyUI 首参考图工作流检测到模型/文件：${profile.name}`,
+        profile.hints?.length ? `工作流模型线索：${profile.hints.join(', ')}` : '',
+        '如果用户配置的系统提示词与当前工作流模型冲突，必须以当前工作流模型规则为准。',
+        profile.instruction,
+    ].filter(Boolean).join('\n');
+}
+
+function syncBootstrapSystemPromptField() {
+    if (typeof document === 'undefined') {
+        return;
+    }
+    const input = document.getElementById('st_chatu8_character_reference_system_prompt');
+    if (!input) {
+        return;
+    }
+    const data = settings();
+    const stored = asString(data.characterReferenceSystemPrompt || data.comfyCharacterReferenceSystemPrompt || data.comfyAutoReferenceBootstrapSystemPrompt);
+    if (!input.value && stored) {
+        input.value = stored;
+    }
+    if (input.value && input.value !== stored) {
+        data.characterReferenceSystemPrompt = input.value;
+        data.comfyCharacterReferenceSystemPrompt = input.value;
+        data.comfyAutoReferenceBootstrapSystemPrompt = input.value;
+        saveSettingsDebounced();
+    }
+    if (input.dataset.stChatu8Bound === '1') {
+        return;
+    }
+    input.dataset.stChatu8Bound = '1';
+    input.addEventListener('input', () => {
+        data.characterReferenceSystemPrompt = input.value;
+        data.comfyCharacterReferenceSystemPrompt = input.value;
+        data.comfyAutoReferenceBootstrapSystemPrompt = input.value;
+        saveSettingsDebounced();
+    });
+}
+
+function installBootstrapSettingsObserver() {
+    if (typeof document === 'undefined') {
+        return;
+    }
+    const bind = () => syncBootstrapSystemPromptField();
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', bind, { once: true });
+    } else {
+        bind();
+    }
+    if (typeof MutationObserver === 'undefined') {
+        return;
+    }
+    const observer = new MutationObserver(() => bind());
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+}
+
+installBootstrapSettingsObserver();
 
 function syncBootstrapWorkerSelect() {
     if (typeof document === 'undefined') {
         return;
     }
+    syncBootstrapSystemPromptField();
     const select = document.getElementById(BOOTSTRAP_WORKER_SELECT_ID);
     if (!select) {
         return;
@@ -80,7 +294,7 @@ function syncBootstrapWorkerSelect() {
     }
     select.dataset.stChatu8Bound = '1';
     select.addEventListener('change', () => {
-        settings().comfyAutoReferenceBootstrapWorkerId = select.value;
+        setCharacterReferenceWorkerId(select.value);
         saveSettingsDebounced();
     });
     select.addEventListener('focus', syncBootstrapWorkerSelect);
@@ -153,14 +367,535 @@ function uniqueStrings(values) {
     return result;
 }
 
+function containsCjk(value) {
+    return /[\u3400-\u9fff\uf900-\ufaff]/.test(asString(value));
+}
+
+function isAsciiAlias(value) {
+    return /^[A-Za-z0-9 _.'\-]+$/.test(asString(value));
+}
+
+function isAsciiWordChar(value) {
+    return /^[A-Za-z0-9_]$/.test(value || '');
+}
+
+function findAliasIndex(text, alias) {
+    const source = asString(text);
+    const needle = asString(alias);
+    if (!source || !needle) {
+        return -1;
+    }
+    const lowerSource = source.toLowerCase();
+    const lowerNeedle = needle.toLowerCase();
+    let index = lowerSource.indexOf(lowerNeedle);
+    if (index < 0 || !isAsciiAlias(needle)) {
+        return index;
+    }
+    while (index >= 0) {
+        const before = lowerSource[index - 1] || '';
+        const after = lowerSource[index + lowerNeedle.length] || '';
+        if (!isAsciiWordChar(before) && !isAsciiWordChar(after)) {
+            return index;
+        }
+        index = lowerSource.indexOf(lowerNeedle, index + 1);
+    }
+    return -1;
+}
+
+function englishPromptSegments(value) {
+    const normalized = asString(value)
+        .replace(/[\uFF0C\u3001\uFF1B\u3002]/g, ',')
+        .replace(/[{}[\]]/g, ' ');
+    if (!normalized) {
+        return [];
+    }
+    return normalized
+        .split(/[\n\r,;]+/)
+        .map((segment) => segment.replace(/\s+/g, ' ').trim())
+        .filter((segment) => {
+            if (!segment || containsCjk(segment)) {
+                return false;
+            }
+            if (/^[\d\s.,;:()_-]+$/.test(segment)) {
+                return false;
+            }
+            return !/^(?:type|subject|highlight|angle|character|pose(?:\s*&\s*action)?|action|clothing|extra\s+details|environment|scene|background)\s*:/i.test(segment);
+        });
+}
+
+function sanitizeEnglishPrompt(value, fallback = '') {
+    let segments = englishPromptSegments(value);
+    if (!segments.length && fallback) {
+        segments = englishPromptSegments(fallback);
+    }
+    const seen = new Set();
+    return segments
+        .filter((segment) => {
+            const key = segment.toLowerCase();
+            if (seen.has(key)) {
+                return false;
+            }
+            seen.add(key);
+            return true;
+        })
+        .join(', ');
+}
+
+function defaultEnglishReferencePrompt(name = 'the current character') {
+    const profile = referencePromptModelProfile();
+    if (profile.family === 'illustrious') {
+        return [
+            'masterpiece, best quality, amazing quality',
+            'very awa, very aesthetic, newest',
+            'safe',
+            '1girl, solo',
+            sanitizeEnglishPrompt(name) || 'the current character',
+            'full body, standing, front view, looking at viewer',
+            'neutral expression, arms relaxed',
+            'character reference sheet, plain white background',
+            'detailed face, clear eyes, coherent anatomy',
+            'absurdres, highres',
+        ].filter(Boolean).join(', ');
+    }
+    return [
+        'sfw',
+        'solo character',
+        'full body character reference sheet',
+        'standing, front view, neutral pose, neutral expression, arms relaxed',
+        'plain white background, soft even lighting, no scenery',
+        'detailed face, clear eyes, coherent anatomy',
+        sanitizeEnglishPrompt(name) || 'the current character',
+    ].filter(Boolean).join(', ');
+}
+
+function stripReasoningBlocks(value) {
+    return asString(value)
+        .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
+        .replace(/<think>[\s\S]*?<\/think>/gi, '')
+        .trim();
+}
+
+function originalDesignLine(label, value) {
+    return `${label}: ${asString(value)}`;
+}
+
+function normalizeDesignFieldLabel(label) {
+    return asString(label)
+        .replace(/[\s_\-]+/g, '')
+        .replace(/[：:]+$/g, '')
+        .toLowerCase();
+}
+
+function parseLooseDesignFields(blockText) {
+    const fields = new Map();
+    let currentKey = '';
+    for (const rawLine of asString(blockText).split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line) {
+            continue;
+        }
+        const match = line.match(/^([^:：]{1,40})[:：]\s*(.*)$/);
+        if (match) {
+            currentKey = normalizeDesignFieldLabel(match[1]);
+            const value = asString(match[2]);
+            if (currentKey) {
+                const previous = fields.get(currentKey);
+                fields.set(currentKey, previous ? `${previous}, ${value}` : value);
+            }
+        } else if (currentKey) {
+            const previous = fields.get(currentKey);
+            fields.set(currentKey, previous ? `${previous}, ${line}` : line);
+        }
+    }
+    return fields;
+}
+
+function designField(fields, aliases) {
+    for (const alias of aliases) {
+        const value = fields.get(normalizeDesignFieldLabel(alias));
+        if (asString(value)) {
+            return asString(value);
+        }
+    }
+    return '';
+}
+
+function joinDesignFields(fields, aliases) {
+    const seen = new Set();
+    const values = [];
+    for (const alias of aliases) {
+        const value = designField(fields, [alias]);
+        for (const segment of value.split(/[,，;；\n\r]+/).map((item) => item.trim()).filter(Boolean)) {
+            const key = segment.toLowerCase();
+            if (!seen.has(key)) {
+                seen.add(key);
+                values.push(segment);
+            }
+        }
+    }
+    return values.join(', ');
+}
+
+function isWeakParsedDesignValue(value) {
+    const text = asString(value);
+    return !text || /^[\d\s,.;:，。；：\-]+$/.test(text);
+}
+
+function mergeDesignRecord(primary = {}, supplemental = {}) {
+    const result = { ...(supplemental || {}), ...(primary || {}) };
+    for (const [key, value] of Object.entries(supplemental || {})) {
+        if (key === 'matchedOutfits') {
+            continue;
+        }
+        if (isWeakParsedDesignValue(result[key]) && asString(value)) {
+            result[key] = value;
+        }
+    }
+    return result;
+}
+
+function matchingDesignRecord(records, target, index = 0) {
+    const names = splitAliases(target?.nameCN, target?.nameEN);
+    if (names.length) {
+        const matched = records.find((record) => {
+            const aliases = splitAliases(record?.nameCN, record?.nameEN);
+            return aliases.some((alias) => names.some((name) => normalizeName(alias) === normalizeName(name)));
+        });
+        if (matched) {
+            return matched;
+        }
+    }
+    return records[index] || null;
+}
+
+function mergeParsedDesigns(legacyParsed, flexibleParsed) {
+    const legacyCharacters = Array.isArray(legacyParsed?.characters) ? legacyParsed.characters : [];
+    const legacyOutfits = Array.isArray(legacyParsed?.outfits) ? legacyParsed.outfits : [];
+    const flexibleCharacters = Array.isArray(flexibleParsed?.characters) ? flexibleParsed.characters : [];
+    const flexibleOutfits = Array.isArray(flexibleParsed?.outfits) ? flexibleParsed.outfits : [];
+    if (!legacyCharacters.length && !legacyOutfits.length) {
+        return flexibleCharacters.length || flexibleOutfits.length ? flexibleParsed : null;
+    }
+    if (!flexibleCharacters.length && !flexibleOutfits.length) {
+        return legacyParsed;
+    }
+
+    const outfits = legacyOutfits.length
+        ? legacyOutfits.map((outfit, index) => mergeDesignRecord(outfit, matchingDesignRecord(flexibleOutfits, outfit, index) || {}))
+        : flexibleOutfits.slice();
+    for (const outfit of flexibleOutfits) {
+        if (!matchingDesignRecord(outfits, outfit)) {
+            outfits.push(outfit);
+        }
+    }
+
+    const characters = legacyCharacters.length
+        ? legacyCharacters.map((character, index) => {
+            const merged = mergeDesignRecord(character, matchingDesignRecord(flexibleCharacters, character, index) || {});
+            const matchedOutfits = Array.isArray(character?.matchedOutfits) ? character.matchedOutfits : [];
+            if (matchedOutfits.length) {
+                merged.matchedOutfits = matchedOutfits.map((outfit, outfitIndex) => mergeDesignRecord(outfit, matchingDesignRecord(flexibleOutfits, outfit, outfitIndex) || {}));
+            } else if (outfits.length) {
+                merged.matchedOutfits = [outfits[0]];
+            }
+            return merged;
+        })
+        : flexibleCharacters.slice();
+    for (const character of flexibleCharacters) {
+        if (!matchingDesignRecord(characters, character)) {
+            characters.push(character);
+        }
+    }
+    return { characters, outfits };
+}
+
+function parseFlexibleOriginalDesignText(value) {
+    const text = asString(value);
+    if (!text) {
+        return null;
+    }
+    const characters = [];
+    const outfits = [];
+    const blockPattern = /<(人物|角色|服装)(?:\s+[^>]*)?>([\s\S]*?)<\/\1>/g;
+    let match;
+    while ((match = blockPattern.exec(text)) !== null) {
+        const type = match[1];
+        const fields = parseLooseDesignFields(match[2]);
+        if (type === '服装') {
+            const frontPrompt = joinDesignFields(fields, [
+                '服饰类型', '服装类型', '服装分类', '设计定位', '适合场景',
+                '风格', '颜色', '主色调', '辅色调', '色板', '材质', '材质表现', '主料', '辅料', '功能性', '纹理与花纹',
+                '正面视角视觉描述', '首层', '中层', '配饰',
+                'SFW正面层', '正面层', '上半身', '上半身SFW', '下半身', '下半身SFW',
+                'SFW鞋子式样', '鞋子式样', '鞋子', '配饰', 'SFW手套或手部装饰', '手套或手部装饰',
+            ]);
+            const backPrompt = joinDesignFields(fields, [
+                '背面视角视觉描述', '首层背面', '中层背面', '配饰背面',
+                'SFW背面层', '背面层', '上半身背面', '上半身SFW背面', '下半身背面', '下半身SFW背面',
+            ]);
+            outfits.push({
+                nameCN: designField(fields, ['中文名称', '服装中文名称', '服装名', '名称']),
+                nameEN: designField(fields, ['英文名称', '服装英文名称', 'english name', 'nameEN']),
+                owner: designField(fields, ['归属人', '所属角色', '角色', 'owner']),
+                style: joinDesignFields(fields, ['风格', '设计定位', '适合性格', '适合场景']),
+                color: joinDesignFields(fields, ['颜色', '主色调', '辅色调', '色板']),
+                material: joinDesignFields(fields, ['材质', '材质表现', '主料', '辅料', '功能性', '纹理与花纹']),
+                upperBody: joinDesignFields(fields, ['SFW正面层', '正面层', '上半身', '上半身SFW', '正面视角视觉描述', '首层', '中层', '服饰类型', '服装类型', '服装分类', '材质', '材质表现', '主料', '辅料', '功能性', '纹理与花纹', '配饰', 'SFW手套或手部装饰']),
+                upperBodyBack: joinDesignFields(fields, ['SFW背面层', '背面层', '上半身背面', '上半身SFW背面']),
+                fullBody: frontPrompt,
+                fullBodyBack: backPrompt,
+            });
+        } else {
+            characters.push({
+                nameCN: designField(fields, ['中文名称', '角色中文名称', '角色名', '姓名', '名称']),
+                nameEN: designField(fields, ['英文名称', '角色英文名称', 'english name', 'nameEN']),
+                characterTraits: designField(fields, ['角色特征', '特征', '气质', '人物特征']),
+                facialFeatures: designField(fields, ['五官外貌', '外貌', '面部', '脸部', 'facialFeatures']),
+                facialFeaturesBack: designField(fields, ['五官外貌背面', '背面外貌', 'facialFeaturesBack']),
+                upperBodySFW: designField(fields, ['上半身SFW', '上半身', '上身SFW', '上身']),
+                upperBodySFWBack: designField(fields, ['上半身SFW背面', '上半身背面', '上身背面']),
+                fullBodySFW: designField(fields, ['下半身SFW', '下半身', '全身SFW', '全身']),
+                fullBodySFWBack: designField(fields, ['下半身SFW背面', '下半身背面', '全身背面']),
+                upperBodyNSFW: designField(fields, ['上半身NSFW']),
+                upperBodyNSFWBack: designField(fields, ['上半身NSFW背面']),
+                fullBodyNSFW: designField(fields, ['下半身NSFW']),
+                fullBodyNSFWBack: designField(fields, ['下半身NSFW背面']),
+            });
+        }
+    }
+    if (characters.length && outfits.length) {
+        characters[0].matchedOutfits = [outfits[0]];
+    }
+    return characters.length || outfits.length ? { characters, outfits } : null;
+}
+
+function buildOriginalCharDesignText(data, meta) {
+    const outfit = data?.outfit && typeof data.outfit === 'object' ? data.outfit : {};
+    const nameCN = asString(data?.nameCN || meta?.displayName, '当前角色');
+    const nameEN = asString(data?.nameEN || englishAliasFromValues([...(meta?.requestNames || []), ...(meta?.currentNames || []), meta?.displayName]), 'Current Character');
+    const outfitNameCN = asString(outfit.nameCN, '默认参考服装');
+    const outfitNameEN = asString(outfit.nameEN, 'default reference outfit');
+    return [
+        '<人物>',
+        originalDesignLine('中文名称', nameCN),
+        originalDesignLine('英文名称', nameEN),
+        originalDesignLine('角色特征', data?.characterTraits),
+        originalDesignLine('五官外貌', data?.facialFeatures),
+        originalDesignLine('五官外貌背面', data?.facialFeaturesBack),
+        originalDesignLine('上半身SFW', data?.upperBodySFW),
+        originalDesignLine('上半身SFW背面', data?.upperBodySFWBack),
+        originalDesignLine('下半身SFW', data?.fullBodySFW),
+        originalDesignLine('下半身SFW背面', data?.fullBodySFWBack),
+        originalDesignLine('上半身NSFW', data?.upperBodyNSFW),
+        originalDesignLine('上半身NSFW背面', data?.upperBodyNSFWBack),
+        originalDesignLine('下半身NSFW', data?.fullBodyNSFW),
+        originalDesignLine('下半身NSFW背面', data?.fullBodyNSFWBack),
+        '</人物>',
+        '<服装>',
+        originalDesignLine('中文名称', outfitNameCN),
+        originalDesignLine('英文名称', outfitNameEN),
+        originalDesignLine('归属人', nameCN),
+        originalDesignLine('上半身', outfit.upperBody),
+        originalDesignLine('上半身背面', outfit.upperBodyBack),
+        originalDesignLine('下半身', outfit.fullBody),
+        originalDesignLine('下半身背面', outfit.fullBodyBack),
+        '</服装>',
+    ].join('\n');
+}
+
+function parseOriginalCharDesignText(value) {
+    const text = stripReasoningBlocks(value);
+    if (!text) {
+        return null;
+    }
+    const flexibleParsed = parseFlexibleOriginalDesignText(text);
+    let legacyParsed = null;
+    try {
+        const parsed = extractCharacterAndOutfitTags(text);
+        const characters = Array.isArray(parsed?.characters) ? parsed.characters : [];
+        const outfits = Array.isArray(parsed?.outfits) ? parsed.outfits : [];
+        legacyParsed = characters.length || outfits.length ? { characters, outfits } : null;
+    } catch (error) {
+        console.warn('[st-chatu8] Failed to parse original character design text:', error);
+    }
+    return mergeParsedDesigns(legacyParsed, flexibleParsed);
+}
+
+function selectParsedCharacter(parsed, meta) {
+    const characters = Array.isArray(parsed?.characters) ? parsed.characters : [];
+    if (!characters.length) {
+        return null;
+    }
+    const keys = currentCharacterNameKeys(meta);
+    if (!keys.length) {
+        return characters[0];
+    }
+    return characters.find((character) => {
+        const aliases = splitAliases(character?.nameCN, character?.nameEN);
+        return aliases.some((alias) => currentCharacterAliasMatches(keys, alias));
+    }) || characters[0];
+}
+
+function selectParsedOutfit(parsed, character) {
+    const matched = Array.isArray(character?.matchedOutfits) ? character.matchedOutfits : [];
+    if (matched.length) {
+        return matched[0];
+    }
+    const outfits = Array.isArray(parsed?.outfits) ? parsed.outfits : [];
+    return outfits[0] || {};
+}
+
+function promptFromOriginalDesign(data, meta, request, fallback = '') {
+    const outfit = data?.outfit && typeof data.outfit === 'object' ? data.outfit : {};
+    const englishName = englishAliasFromValues([
+        data?.nameEN,
+        ...(Array.isArray(meta?.requestNames) ? meta.requestNames : []),
+        ...(Array.isArray(meta?.currentNames) ? meta.currentNames : []),
+        meta?.displayName,
+        request?.referenceCharacterName,
+    ]) || 'the current character';
+    return sanitizeEnglishPrompt([
+        defaultEnglishReferencePrompt(englishName),
+        data?.characterTraits,
+        data?.facialFeatures,
+        data?.upperBodySFW,
+        data?.fullBodySFW,
+        outfit.nameEN,
+        outfit.style,
+        outfit.color,
+        outfit.material,
+        outfit.upperBody,
+        outfit.fullBody,
+        outfit.extraPrompt,
+        outfit.prompt,
+    ].map(asString).filter(Boolean).join(', '), fallback || defaultEnglishReferencePrompt(englishName));
+}
+
+function originalCharDesignRoleName(meta, request) {
+    const hasResolvedRequestName = Array.isArray(meta?.requestNames)
+        && meta.requestNames.length > 0
+        && meta?.requestCharacterSource !== 'unresolved';
+    const candidates = uniqueStrings([
+        ...(hasResolvedRequestName ? meta.requestNames : []),
+        request?.referenceCharacterName,
+        ...(hasResolvedRequestName ? [meta?.displayName] : []),
+        ...(hasResolvedRequestName ? (Array.isArray(meta?.currentNames) ? meta.currentNames : []) : []),
+    ]);
+    for (const candidate of candidates) {
+        const cleaned = cleanExtractedCharacterName(candidate) || asString(candidate);
+        if (!cleaned || cleaned === '当前角色' || cleaned === 'current character') {
+            continue;
+        }
+        if (isLooseCharacterNameCandidate(cleaned) || findKnownCharacterInCandidate(cleaned, collectKnownCharacterAliasRecords(meta?.context, meta?.character, meta?.currentNames))) {
+            return cleaned;
+        }
+    }
+    if (!hasResolvedRequestName && (asString(request?.id).startsWith('chatu8_anchor:') || asString(request?.change).includes('chatu8_anchor'))) {
+        return '新角色';
+    }
+    return asString(meta?.displayName, '当前角色');
+}
+
+function originalCharDesignPronoun(meta, request) {
+    const source = [
+        meta?.displayName,
+        ...(Array.isArray(meta?.names) ? meta.names : []),
+        request?.debugFramePrompt,
+        request?.debugSourceContext,
+        request?.prompt,
+        meta?.cardText,
+    ].map(asString).filter(Boolean).join('\n');
+    if (/(?:她|女性|女人|女孩|少女|女童|女主|小姐|姑娘|女仆|公主|母亲|姐姐|妹妹|妻子|女儿)/.test(source)) {
+        return '她';
+    }
+    if (/(?:他|男性|男人|男孩|少年|男童|男主|先生|公子|父亲|哥哥|弟弟|丈夫|儿子)/.test(source)) {
+        return '他';
+    }
+    return '其';
+}
+
+function originalCharDesignUserDemand(meta, request) {
+    const roleName = originalCharDesignRoleName(meta, request);
+    const pronoun = originalCharDesignPronoun(meta, request);
+    return `生成${roleName}的形象以及为${pronoun}设计一套初始服装`;
+}
+
+function bootstrapDataFromParsedDesign(parsed, meta, request, fallback) {
+    const character = selectParsedCharacter(parsed, meta);
+    if (!character) {
+        return {};
+    }
+    const outfit = selectParsedOutfit(parsed, character);
+    const data = {
+        nameCN: asString(character.nameCN, fallback.nameCN || meta?.displayName),
+        nameEN: asString(character.nameEN, fallback.nameEN || englishAliasFromValues([meta?.displayName])),
+        characterTraits: asString(character.characterTraits, fallback.characterTraits),
+        facialFeatures: asString(character.facialFeatures, fallback.facialFeatures),
+        facialFeaturesBack: asString(character.facialFeaturesBack, fallback.facialFeaturesBack),
+        upperBodySFW: asString(character.upperBodySFW, fallback.upperBodySFW),
+        upperBodySFWBack: asString(character.upperBodySFWBack, fallback.upperBodySFWBack),
+        fullBodySFW: asString(character.fullBodySFW, fallback.fullBodySFW),
+        fullBodySFWBack: asString(character.fullBodySFWBack, fallback.fullBodySFWBack),
+        upperBodyNSFW: asString(character.upperBodyNSFW, fallback.upperBodyNSFW),
+        upperBodyNSFWBack: asString(character.upperBodyNSFWBack, fallback.upperBodyNSFWBack),
+        fullBodyNSFW: asString(character.fullBodyNSFW, fallback.fullBodyNSFW),
+        fullBodyNSFWBack: asString(character.fullBodyNSFWBack, fallback.fullBodyNSFWBack),
+        outfit: {
+            ...fallback.outfit,
+            nameCN: asString(outfit.nameCN, fallback.outfit?.nameCN),
+            nameEN: asString(outfit.nameEN, fallback.outfit?.nameEN),
+            owner: asString(outfit.owner, character.nameCN || fallback.outfit?.owner),
+            style: asString(outfit.style, fallback.outfit?.style),
+            color: asString(outfit.color, fallback.outfit?.color),
+            material: asString(outfit.material, fallback.outfit?.material),
+            upperBody: asString(outfit.upperBody, fallback.outfit?.upperBody),
+            upperBodyBack: asString(outfit.upperBodyBack, fallback.outfit?.upperBodyBack),
+            fullBody: asString(outfit.fullBody, fallback.outfit?.fullBody),
+            fullBodyBack: asString(outfit.fullBodyBack, fallback.outfit?.fullBodyBack),
+        },
+    };
+    data.referencePromptEN = promptFromOriginalDesign(data, meta, request, fallback.referencePromptEN);
+    return data;
+}
+
+function englishAliasFromValues(values) {
+    for (const value of values || []) {
+        for (const alias of splitAliases(value)) {
+            if (alias && !containsCjk(alias) && /^[A-Za-z0-9 _.'\-]+$/.test(alias)) {
+                return alias;
+            }
+        }
+    }
+    return '';
+}
+
+function isDescriptiveCharacterFragment(value) {
+    const text = asString(value);
+    if (!text) {
+        return true;
+    }
+    if (/^(?:female|male|woman|women|man|men|girl|girls|boy|boys|subject|character|unknown|none|n\/a)$/i.test(text)) {
+        return true;
+    }
+    return /(?:\d+\s*岁|[一二三四五六七八九十百零〇两]+\s*岁|女童|男童|少女|少年|成年|成人|女子|女性|女人|美女|美人|仙子|修仙者|角色|人物|主体|气质|形象|人设|设定|风格|氛围|外貌|特征|身穿|穿着|服装|衣|裙|袍|衫|赤足|足踝|头发|发色|青丝|长发|短发|黑发|白发|银发|金发|蓝发|眼睛|眼眸|瞳|赤眸|紫眸|肤|身材|身段|曲线|体型|姿势|表情|背景|场景|镜头|水蓝|长裙|湿透|凌空|披散|鳞片|dress|robe|skirt|hair|eyes|body|pose|clothing|background|scene|angle)/i.test(text);
+}
+
 function cleanExtractedCharacterName(value) {
     let text = asString(value);
     if (!text) {
         return '';
     }
     text = text.split(/\s+(?:Type|Subject|Highlight|Angle|Character|Pose\s*&\s*Action|Pose|Action|Clothing|Extra\s+Details|Environment|Scene|Background)\s*[:\uFF1A]/i)[0];
-    text = text.split(/[\uFF0C,;\uFF1B\u3002.\n\r]/)[0];
+    const segments = text.split(/[\uFF0C,;\uFF1B\u3002.\n\r]/)
+        .map((segment) => segment.replace(/^(?:subject\s*[:\uFF1A]?\s*)?(?:female|male|woman|man|girl|boy)\b\s*[:\uFF1A\-]?\s*/i, '').trim())
+        .filter(Boolean);
+    text = segments.find((segment) => containsCjk(segment) && !isDescriptiveCharacterFragment(segment) && segment.length <= 12)
+        || segments.find((segment) => !isDescriptiveCharacterFragment(segment))
+        || '';
     text = text.replace(/^[\s:\uFF1A\-]+|[\s:\uFF1A\-]+$/g, '');
+    if (isDescriptiveCharacterFragment(text)) {
+        return '';
+    }
     return text.length >= 2 && text.length <= 80 ? text : '';
 }
 
@@ -231,6 +966,220 @@ function collectCurrentNames(context, character) {
         add(window.name2);
     }
     return Array.from(names);
+}
+
+function collectKnownCharacterAliasRecords(context, character, currentNames = []) {
+    const records = [];
+    const seen = new Set();
+    const add = (displayName, alias, source, priority) => {
+        const text = asString(alias);
+        const key = normalizeName(text);
+        if (!text || !key || seen.has(`${source}:${key}`)) {
+            return;
+        }
+        seen.add(`${source}:${key}`);
+        records.push({
+            displayName: asString(displayName) || text,
+            alias: text,
+            key,
+            source,
+            priority,
+        });
+    };
+
+    const currentDisplay = currentNames.find(Boolean);
+    for (const name of currentNames) {
+        for (const alias of splitAliases(name)) {
+            add(currentDisplay || alias, alias, 'current_character', 0);
+        }
+    }
+
+    const presets = settings().characterPresets || {};
+    if (presets && typeof presets === 'object' && !Array.isArray(presets)) {
+        for (const [presetId, preset] of Object.entries(presets)) {
+            if (!preset) {
+                continue;
+            }
+            const display = splitAliases(preset?.nameCN, preset?.nameEN, presetId)[0] || presetId;
+            for (const alias of splitAliases(presetId, preset?.nameCN, preset?.nameEN)) {
+                add(display, alias, 'character_preset', 1);
+            }
+        }
+    }
+
+    if (character && typeof character === 'object') {
+        const display = asString(character.name || context?.name2 || currentDisplay);
+        for (const alias of splitAliases(character.name, character.avatar, character?.data?.name)) {
+            add(display || alias, alias.replace(/\.[^/.\\]+$/, ''), 'current_character', 0);
+        }
+    }
+
+    return records.sort((left, right) => left.priority - right.priority || right.alias.length - left.alias.length);
+}
+
+function extractReferenceFieldCandidates(text) {
+    const source = asString(text);
+    if (!source) {
+        return [];
+    }
+    const candidates = [];
+    const pattern = /(?:^|[\s\n\r])(?:Character|\u89d2\u8272|\u4eba\u7269|\u5f53\u524d\u89d2\u8272|\u4e3b\u89d2)\s*[:\uFF1A]\s*([^\n\r]+)/gi;
+    for (const match of source.matchAll(pattern)) {
+        const candidate = cleanExtractedCharacterName(match[1]);
+        if (candidate) {
+            candidates.push(candidate);
+        }
+    }
+    return uniqueStrings(candidates);
+}
+
+function extractSubjectFieldCandidates(text) {
+    const source = asString(text);
+    if (!source) {
+        return [];
+    }
+    const candidates = [];
+    const pattern = /(?:^|[\s\n\r])(?:Subject|\u4e3b\u4f53)\s*[:\uFF1A]?\s*([^\n\r]+)/gi;
+    for (const match of source.matchAll(pattern)) {
+        const candidate = cleanExtractedCharacterName(match[1]);
+        if (candidate) {
+            candidates.push(candidate);
+        }
+    }
+    return uniqueStrings(candidates);
+}
+
+function findKnownCharacterInCandidate(candidate, aliases) {
+    const clean = cleanExtractedCharacterName(candidate);
+    const key = normalizeName(clean);
+    if (!clean || !key) {
+        return null;
+    }
+    const exact = aliases.find((record) => record.key === key);
+    if (exact) {
+        return exact;
+    }
+    const contained = aliases
+        .map((record) => ({ record, index: findAliasIndex(clean, record.alias) }))
+        .filter((match) => match.index >= 0)
+        .sort((left, right) => left.index - right.index || right.record.alias.length - left.record.alias.length);
+    return contained[0]?.record || null;
+}
+
+function findKnownCharacterInText(text, aliases) {
+    const source = asString(text);
+    if (!source) {
+        return null;
+    }
+    const matches = aliases
+        .map((record) => ({ record, index: findAliasIndex(source, record.alias) }))
+        .filter((match) => match.index >= 0)
+        .sort((left, right) => left.index - right.index || left.record.priority - right.record.priority || right.record.alias.length - left.record.alias.length);
+    return matches[0]?.record || null;
+}
+
+function isLooseCharacterNameCandidate(value) {
+    const text = cleanExtractedCharacterName(value);
+    if (!text) {
+        return false;
+    }
+    if (isDescriptiveCharacterFragment(text)) {
+        return false;
+    }
+    if (containsCjk(text)) {
+        if (text.length > 12 || /\s/.test(text)) {
+            return false;
+        }
+        return !/[\u8eab\u8eaf\u6bdb\u6bef\u8737\u7761\u8eba\u5367\u5750\u7ad9\u770b\u7b11\u54ed\u9886\u53e3\u540e\u9888\u9501\u9aa8\u8170\u81c0\u80f8\u817f\u624b\u6307\u59ff\u52bf\u8868\u60c5\u80cc\u666f\u573a\u666f\u8f66\u53a2\u623f\u95f4]/.test(text);
+    }
+    return /^[A-Za-z][A-Za-z0-9 .'\-]{1,48}$/.test(text) && text.split(/\s+/).length <= 4;
+}
+
+function resolveRequestCharacterNames(request, context, character, currentNames = []) {
+    const aliases = collectKnownCharacterAliasRecords(context, character, currentNames);
+    const explicitRequestName = asString(
+        request?.referenceCharacterName ||
+        request?.reference_character_name ||
+        request?.characterName ||
+        request?.character_name,
+    );
+    const sourceText = [
+        request?.debugFramePrompt,
+        request?.debugSourceContext,
+        request?.sourceContext,
+        request?.context,
+        request?.prompt,
+        request?.debugPromptRaw,
+    ].map(asString).filter(Boolean).join('\n');
+
+    if (explicitRequestName) {
+        const known = findKnownCharacterInCandidate(explicitRequestName, aliases);
+        if (known) {
+            return {
+                names: uniqueStrings([known.displayName, explicitRequestName]),
+                source: request?.referenceCharacterSource || `${known.source}:request`,
+                candidates: [explicitRequestName],
+            };
+        }
+        if (isLooseCharacterNameCandidate(explicitRequestName)) {
+            return {
+                names: [cleanExtractedCharacterName(explicitRequestName)],
+                source: request?.referenceCharacterSource || 'explicit_request',
+                candidates: [explicitRequestName],
+            };
+        }
+    }
+
+    const explicitFields = extractReferenceFieldCandidates(sourceText);
+    for (const candidate of explicitFields) {
+        const known = findKnownCharacterInCandidate(candidate, aliases);
+        if (known) {
+            return {
+                names: uniqueStrings([known.displayName, candidate]),
+                source: `${known.source}:character_field`,
+                candidates: explicitFields,
+            };
+        }
+    }
+
+    const knownInText = findKnownCharacterInText(sourceText, aliases);
+    if (knownInText) {
+        return {
+            names: uniqueStrings([knownInText.displayName, knownInText.alias]),
+            source: `${knownInText.source}:text_match`,
+            candidates: explicitFields,
+        };
+    }
+
+    const subjectFields = extractSubjectFieldCandidates(sourceText);
+    for (const candidate of subjectFields) {
+        const known = findKnownCharacterInCandidate(candidate, aliases);
+        if (known) {
+            return {
+                names: uniqueStrings([known.displayName, candidate]),
+                source: `${known.source}:subject_field`,
+                candidates: subjectFields,
+            };
+        }
+    }
+
+    if (!currentNames.length) {
+        for (const candidate of explicitFields) {
+            if (isLooseCharacterNameCandidate(candidate)) {
+                return {
+                    names: [cleanExtractedCharacterName(candidate)],
+                    source: 'explicit_character_field',
+                    candidates: explicitFields,
+                };
+            }
+        }
+    }
+
+    return {
+        names: [],
+        source: 'unresolved',
+        candidates: uniqueStrings([...explicitFields, ...subjectFields]),
+    };
 }
 
 function addWorldBookName(names, value) {
@@ -339,11 +1288,13 @@ async function collectWorldBookText(context, character) {
 async function currentCharacterMeta(request = {}) {
     const context = typeof getContext === 'function' ? getContext() : {};
     const character = getCharacterFromContext(context) || {};
-    const contextNames = requestCharacterNames(request);
     const currentNames = collectCurrentNames(context, character);
+    const requestCharacter = resolveRequestCharacterNames(request, context, character, currentNames);
+    const contextNames = requestCharacter.names;
     const stHasCurrentCharacter = hasCurrentCharacter(context, character);
-    const names = uniqueStrings([...(stHasCurrentCharacter ? currentNames : []), ...contextNames, ...currentNames]);
-    const displayName = (stHasCurrentCharacter ? currentNames[0] : contextNames[0]) || names[0] || '当前角色';
+    const hasRequestCharacter = contextNames.length > 0;
+    const names = uniqueStrings([...(hasRequestCharacter ? contextNames : (stHasCurrentCharacter ? currentNames : [])), ...currentNames, ...contextNames]);
+    const displayName = (hasRequestCharacter ? contextNames[0] : (stHasCurrentCharacter ? currentNames[0] : '')) || names[0] || '当前角色';
     const data = character.data && typeof character.data === 'object' ? character.data : character;
     const textFields = [
         ['name', displayName],
@@ -362,7 +1313,19 @@ async function currentCharacterMeta(request = {}) {
         .join('\n\n')
         .slice(0, 12000);
     const worldBookText = await collectWorldBookText(context, character);
-    return { context, character, names, displayName, cardText, worldBookText, hasCurrentCharacter: stHasCurrentCharacter || contextNames.length > 0 };
+    return {
+        context,
+        character,
+        names,
+        requestNames: contextNames,
+        requestCharacterSource: requestCharacter.source,
+        requestCharacterCandidates: requestCharacter.candidates,
+        currentNames,
+        displayName,
+        cardText,
+        worldBookText,
+        hasCurrentCharacter: stHasCurrentCharacter || hasRequestCharacter,
+    };
 }
 
 function presetReferencePath(preset) {
@@ -381,7 +1344,8 @@ function presetAliases(preset, presetId) {
 }
 
 function currentCharacterNameKeys(meta) {
-    return (meta?.names || []).map(normalizeName).filter((name) => name && name.length >= 2);
+    const preferred = Array.isArray(meta?.requestNames) && meta.requestNames.length ? meta.requestNames : meta?.names;
+    return (preferred || []).map(normalizeName).filter((name) => name && name.length >= 2);
 }
 
 function currentCharacterAliasMatches(currentNames, alias) {
@@ -459,30 +1423,64 @@ async function comfyInputImageExists(path) {
     }
 }
 
-async function getReferenceProblem(request, meta) {
+function referenceBootstrapGate(request, meta) {
     const data = settings();
-    if (!isAutoReferenceBootstrapEnabled(data) || !meta?.hasCurrentCharacter) {
-        return null;
-    }
     const adapter = asString(request?.workflowAdapter);
-    const looksLikeKleinAnchor = adapter === 'flux2-klein-reference' || asString(request?.change).includes('chatu8_anchor');
-    if (!looksLikeKleinAnchor) {
+    const explicitDisabled = isAutoReferenceBootstrapExplicitlyDisabled(data);
+    const settingEnabled = isAutoReferenceBootstrapEnabled(data);
+    const requiredByReferenceWorkflow = adapter === 'flux2-klein-reference';
+    const anchorRequest = asString(request?.change).includes('chatu8_anchor') || asString(request?.id).startsWith('chatu8_anchor:');
+    const hasCharacter = meta?.hasCurrentCharacter === true;
+    return {
+        allowed: hasCharacter && !explicitDisabled && (settingEnabled || requiredByReferenceWorkflow),
+        adapter,
+        anchor_request: anchorRequest,
+        required_by_reference_workflow: requiredByReferenceWorkflow,
+        setting_enabled: data.comfyAutoReferenceBootstrapEnabled === true,
+        explicit_enabled: data.comfyAutoReferenceBootstrapExplicitlyEnabled === true,
+        explicit_disabled: explicitDisabled,
+        migrated_off_version: asString(data.comfyAutoReferenceBootstrapMigratedOffVersion),
+        has_character: hasCharacter,
+        character: meta?.displayName || '',
+        request_names: Array.isArray(meta?.requestNames) ? meta.requestNames : [],
+        request_character_source: meta?.requestCharacterSource || '',
+        request_character_candidates: Array.isArray(meta?.requestCharacterCandidates) ? meta.requestCharacterCandidates : [],
+        current_names: Array.isArray(meta?.currentNames) ? meta.currentNames : [],
+        bootstrap_worker: bootstrapWorkerId(),
+    };
+}
+
+function referenceBootstrapSkipReason(gate) {
+    if (!gate?.has_character) {
+        return 'no_character';
+    }
+    if (gate?.explicit_disabled) {
+        return 'explicitly_disabled';
+    }
+    if (!gate?.setting_enabled && !gate?.explicit_enabled && !gate?.required_by_reference_workflow) {
+        return 'setting_disabled';
+    }
+    return 'not_required';
+}
+
+async function getReferenceProblem(request, meta, gate = referenceBootstrapGate(request, meta)) {
+    if (!gate?.allowed) {
         return null;
     }
     const currentPreset = findCurrentCharacterPreset(meta, false);
     if (!currentPreset) {
-        return { reason: 'new_character_without_reference', paths: [] };
+        return { reason: 'new_character_without_reference', paths: [], gate };
     }
     const paths = currentPreset.path ? [currentPreset.path] : [];
     if (!paths.length) {
-        return { reason: 'missing', paths: [] };
+        return { reason: 'missing', paths: [], preset_id: currentPreset.presetId, gate };
     }
     for (const path of paths) {
         if (await comfyInputImageExists(path)) {
             return null;
         }
     }
-    return { reason: 'invalid_or_unavailable', paths };
+    return { reason: 'invalid_or_unavailable', paths, preset_id: currentPreset.presetId, gate };
 }
 
 function parseJsonObject(text) {
@@ -496,21 +1494,19 @@ function parseJsonObject(text) {
 }
 
 function localBootstrapData(meta, request, warning = '') {
-    const name = meta.displayName || 'current character';
-    const rawPrompt = asString(request?.prompt || request?.debugSourceContext);
+    const name = originalCharDesignRoleName(meta, request) || meta.displayName || 'current character';
+    const englishName = englishAliasFromValues([
+        ...(Array.isArray(meta.requestNames) ? meta.requestNames : []),
+        ...(Array.isArray(meta.currentNames) ? meta.currentNames : []),
+        meta.displayName,
+        request?.referenceCharacterName,
+    ]) || 'the current character';
     const promptEN = [
-        'sfw',
-        'solo character',
-        'full body character reference image',
-        'standing, front view, neutral pose',
-        'clean simple background',
-        'detailed face, clear eyes, coherent anatomy',
-        name,
-        rawPrompt,
+        defaultEnglishReferencePrompt(englishName),
     ].filter(Boolean).join(', ');
-    return {
+    const fallback = {
         nameCN: /[\u4e00-\u9fff]/.test(name) ? name : '',
-        nameEN: /[\u4e00-\u9fff]/.test(name) ? name : name,
+        nameEN: englishName,
         characterTraits: '',
         facialFeatures: '',
         facialFeaturesBack: '',
@@ -526,60 +1522,171 @@ function localBootstrapData(meta, request, warning = '') {
         outfit: {
             nameCN: '默认参考服装',
             nameEN: 'default reference outfit',
+            style: '',
+            color: '',
+            material: '',
             upperBody: '',
             upperBodyBack: '',
             fullBody: '',
             fullBodyBack: '',
         },
         referencePromptCN: `为 ${name} 生成一张正面全身角色参考图，姿势自然，背景干净。`,
-        referencePromptEN: promptEN,
-        warnings: warning ? [warning] : ['未能调用 LLM，已使用本地兜底提示词。'],
+        referencePromptEN: sanitizeEnglishPrompt(promptEN, defaultEnglishReferencePrompt(englishName)),
+        warnings: warning
+            ? [`LLM 未成功返回可用角色/服装设定，已使用本地兜底提示词：${warning}`]
+            : ['LLM 未成功返回可用角色/服装设定，已使用本地兜底提示词。'],
     };
+    fallback.stChatu8DesignText = buildOriginalCharDesignText(fallback, meta);
+    fallback.referencePromptEN = promptFromOriginalDesign(fallback, meta, request, fallback.referencePromptEN);
+    return fallback;
 }
 
 function normalizeBootstrapData(value, meta, request) {
     const fallback = localBootstrapData(meta, request);
     const data = value && typeof value === 'object' ? value : {};
     const outfit = data.outfit && typeof data.outfit === 'object' ? data.outfit : {};
-    return {
+    const designText = asString(
+        data.stChatu8DesignText ||
+        data.originalCharDesignText ||
+        data.characterDesignText ||
+        data.designText ||
+        data.tags ||
+        data.raw,
+    );
+    const parsedDesign = parseOriginalCharDesignText(designText);
+    const parsedData = parsedDesign ? bootstrapDataFromParsedDesign(parsedDesign, meta, request, fallback) : {};
+    const flatData = Object.fromEntries(Object.entries(data).map(([key, item]) => [key, Array.isArray(item) || typeof item === 'object' ? item : asString(item)]));
+    const merged = {
         ...fallback,
-        ...Object.fromEntries(Object.entries(data).map(([key, item]) => [key, Array.isArray(item) || typeof item === 'object' ? item : asString(item)])),
+        ...flatData,
+        ...parsedData,
         outfit: {
             ...fallback.outfit,
             ...Object.fromEntries(Object.entries(outfit).map(([key, item]) => [key, asString(item)])),
+            ...(parsedData.outfit || {}),
         },
-        referencePromptEN: asString(data.referencePromptEN || data.reference_prompt_en || data.promptEN || data.prompt_en) || fallback.referencePromptEN,
-        referencePromptCN: asString(data.referencePromptCN || data.reference_prompt_cn || data.promptCN || data.prompt_cn) || fallback.referencePromptCN,
-        warnings: Array.isArray(data.warnings) ? data.warnings.map(asString).filter(Boolean) : fallback.warnings,
     };
+    const llmPromptEN = asString(data.referencePromptEN || data.reference_prompt_en || data.promptEN || data.prompt_en || parsedData.referencePromptEN);
+    merged.referencePromptEN = sanitizeEnglishPrompt(llmPromptEN, fallback.referencePromptEN) || fallback.referencePromptEN;
+    merged.referencePromptCN = asString(data.referencePromptCN || data.reference_prompt_cn || data.promptCN || data.prompt_cn) || fallback.referencePromptCN;
+    merged.warnings = Array.isArray(data.warnings) ? data.warnings.map(asString).filter(Boolean) : fallback.warnings;
+    merged.stChatu8DesignText = designText && parsedDesign ? designText : buildOriginalCharDesignText(merged, meta);
+    merged.originalCharDesignParsed = Boolean(parsedDesign);
+    return merged;
+}
+
+function normalizeBootstrapOutput(raw, meta, request) {
+    const text = asString(raw);
+    try {
+        return normalizeBootstrapData(parseJsonObject(text), meta, request);
+    } catch (jsonError) {
+        const parsedDesign = parseOriginalCharDesignText(text);
+        if (!parsedDesign) {
+            throw jsonError;
+        }
+        return normalizeBootstrapData({ stChatu8DesignText: text }, meta, request);
+    }
+}
+
+function updateBootstrapDataFromDesignText(bootstrapData, designText, meta, request) {
+    const text = asString(designText);
+    if (!text) {
+        return false;
+    }
+    const parsedDesign = parseOriginalCharDesignText(text);
+    if (!parsedDesign) {
+        return false;
+    }
+    const parsedData = bootstrapDataFromParsedDesign(parsedDesign, meta, request, bootstrapData);
+    Object.assign(bootstrapData, parsedData, {
+        stChatu8DesignText: text,
+        originalCharDesignParsed: true,
+    });
+    bootstrapData.outfit = {
+        ...(bootstrapData.outfit || {}),
+        ...(parsedData.outfit || {}),
+    };
+    bootstrapData.referencePromptEN = promptFromOriginalDesign(bootstrapData, meta, request, bootstrapData.referencePromptEN);
+    return true;
 }
 
 function buildBootstrapLlmPrompt(meta, request) {
+    const configuredSystemPrompt = characterReferenceSystemPrompt();
+    const modelProfileText = referencePromptModelProfileText();
+    const designRoleName = originalCharDesignRoleName(meta, request);
+    const designUserDemand = originalCharDesignUserDemand(meta, request);
     const payload = {
-        task: 'create_missing_sillytavern_character_visual_profile_and_first_reference_prompt',
+        task: 'run_original_st_chatu8_character_outfit_design_first_step_for_missing_reference_image',
         output: 'strict_json_only',
         required_keys: [
+            'stChatu8DesignText',
             'nameCN', 'nameEN', 'characterTraits', 'facialFeatures', 'facialFeaturesBack',
             'upperBodySFW', 'upperBodySFWBack', 'fullBodySFW', 'fullBodySFWBack',
             'upperBodyNSFW', 'upperBodyNSFWBack', 'fullBodyNSFW', 'fullBodyNSFWBack',
             'negative', 'outfit', 'referencePromptCN', 'referencePromptEN', 'warnings',
         ],
         outfit_required_keys: ['nameCN', 'nameEN', 'upperBody', 'upperBodyBack', 'fullBody', 'fullBodyBack'],
+        original_st_chatu8_design_text_format: [
+            '<人物>',
+            '中文名称: ...',
+            '英文名称: ...',
+            '角色特征: ...',
+            '五官外貌: ...',
+            '五官外貌背面: ...',
+            '上半身SFW: ...',
+            '上半身SFW背面: ...',
+            '下半身SFW: ...',
+            '下半身SFW背面: ...',
+            '上半身NSFW: ...',
+            '上半身NSFW背面: ...',
+            '下半身NSFW: ...',
+            '下半身NSFW背面: ...',
+            '</人物>',
+            '<服装>',
+            '中文名称: ...',
+            '英文名称: ...',
+            '归属人: 人物中文名称',
+            '上半身: ...',
+            '上半身背面: ...',
+            '下半身: ...',
+            '下半身背面: ...',
+            '</服装>',
+        ].join('\n'),
         policy: {
             infer_only_from_card_scene_and_world_book: true,
             do_not_claim_canon_if_unsure: true,
-            referencePromptEN: 'English ComfyUI prompt, comma separated, suitable for a no-reference first image.',
+            stChatu8DesignText: 'Must be exactly the original plugin character/outfit design block format above. Use <人物> and <服装>, not <角色>. Use the exact Chinese field labels.',
+            nameCN: 'Must be the resolved character identity/name, never Subject, pose, clothing, body description, or scene text.',
+            original_char_design_role_name: 'This is the resolved role name. It is the only source of truth for 中文名称/nameCN.',
+            original_char_design_user_demand: 'This is the exact sentence that would be typed into the original plugin step-2 popup.',
+            image_anchor_prompt: 'Auxiliary visual context only. Never use it as the role name or as the main generation demand.',
+            referencePromptEN: 'English-only ComfyUI prompt, comma separated, suitable for a no-reference first image. Do not copy Chinese source text into this field.',
             reference_image_goal: 'sfw solo full-body front-view character reference image, clean background, stable clothing and facial traits',
         },
+        original_char_design_role_name: designRoleName,
+        original_char_design_user_demand: designUserDemand,
         current_character_names: meta.names,
+        resolved_reference_character_source: meta.requestCharacterSource || '',
+        resolved_reference_character_candidates: meta.requestCharacterCandidates || [],
         image_anchor_prompt: request?.prompt || '',
+        image_anchor_frame_prompt: request?.debugFramePrompt || '',
         image_anchor_context: request?.debugSourceContext || '',
         character_card_text: meta.cardText || '',
         world_book_text: meta.worldBookText || '',
+        current_comfy_reference_model_profile: modelProfileText,
+        configured_character_reference_system_prompt: configuredSystemPrompt,
     };
     return [
-        '你是 SillyTavern 角色设定和 ComfyUI 立绘提示词助手。只输出严格 JSON，不要 Markdown。',
-        '请根据角色卡和当前 image### 提示词，生成角色设定、服装设定，以及一条英文无参考图首图提示词。',
+        configuredSystemPrompt || '你是 SillyTavern 角色/服装设计助手。你必须按原插件“角色/服装设计”第一步的字段格式产出设定，并只输出严格 JSON，不要 Markdown。',
+        modelProfileText,
+        configuredSystemPrompt ? '如果上面的用户配置系统提示词和当前 ComfyUI 工作流模型规则冲突，以当前 ComfyUI 工作流模型规则为准。' : '',
+        configuredSystemPrompt ? '必须遵守上面的用户配置系统提示词；同时只输出严格 JSON，不要 Markdown。' : '',
+        '请根据角色卡和当前 image### 提示词，先生成原插件可解析的角色/服装设计块 stChatu8DesignText，再生成一条英文无参考图首图提示词。',
+        `原插件第二步“输入生成需求”里应写入的内容是：${designUserDemand}`,
+        `其中角色名是：${designRoleName}。角色命名和中文名称必须以这个角色名为准。`,
+        'stChatu8DesignText 必须使用 <人物>/<服装> 标签和 Input JSON 里的精确中文字段名；不能使用 <角色>，不能省略中文名称。',
+        'image_anchor_prompt / image_anchor_frame_prompt 只可作为外貌或服装参考线索，不能覆盖上面的角色名，也不要把场景、姿势、镜头写进角色名。',
+        'referencePromptEN 必须只含英文逗号短语，不要 Type/Subject/Highlight 等中文设定字段名，也不要复制任何中文。',
         '如果角色卡没有明确写出外貌，请保守推断，并在 warnings 里说明。',
         '',
         'Input JSON:',
@@ -589,7 +1696,7 @@ function buildBootstrapLlmPrompt(meta, request) {
 
 async function executeBootstrapLlm(prompt, requestType = BOOTSTRAP_REQUEST_TYPE) {
     const id = `reference_bootstrap_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-    const eventName = `${BOOTSTRAP_REQUEST_TYPE}:${id}`;
+    const eventName = `${requestType || BOOTSTRAP_REQUEST_TYPE}:${id}`;
     let latest = '';
     let eventPayload = null;
     const onResponse = (payload) => {
@@ -615,33 +1722,247 @@ async function executeBootstrapLlm(prompt, requestType = BOOTSTRAP_REQUEST_TYPE)
     return asString(eventPayload?.result || latest);
 }
 
-async function generateBootstrapData(meta, request) {
+async function executeBootstrapLlmWithFallback(prompt, requestTypes) {
+    const types = uniqueStrings(requestTypes).filter(Boolean);
+    let lastError = null;
+    for (const type of types.length ? types : [BOOTSTRAP_REQUEST_TYPE]) {
+        try {
+            return await executeBootstrapLlm(prompt, type);
+        } catch (error) {
+            lastError = error;
+            console.warn('[st-chatu8] Reference bootstrap LLM request failed, trying next type:', type, error);
+        }
+    }
+    throw lastError || new Error('Reference bootstrap LLM request failed.');
+}
+
+async function loadOriginalCharDesignFlowModules() {
+    const [promptReq, worldbook, llmService, promptProcessor, characterGen] = await Promise.all([
+        import('./promptReq.js'),
+        import('./settings/worldbook.js'),
+        import('./settings/llmService.js'),
+        import('./promptProcessor.js'),
+        import('./characterGen.js'),
+    ]);
+    const flow = {
+        getElContext: promptReq.getElContext,
+        processWorldBooksWithTrigger: promptReq.processWorldBooksWithTrigger,
+        generateCharacterListText: worldbook.generateCharacterListText,
+        generateOutfitEnableListText: worldbook.generateOutfitEnableListText,
+        generateCommonCharacterListText: worldbook.generateCommonCharacterListText,
+        buildPromptForRequestType: llmService.buildPromptForRequestType,
+        getMergeOptionsForRequestType: llmService.getMergeOptionsForRequestType,
+        mergeAdjacentMessages: promptProcessor.mergeAdjacentMessages,
+        replaceAllPlaceholders: promptProcessor.replaceAllPlaceholders,
+        LLM_CHAR_DESIGN: characterGen.LLM_CHAR_DESIGN,
+    };
+    const missing = [];
+    if (typeof flow.buildPromptForRequestType !== 'function') {
+        missing.push('buildPromptForRequestType');
+    }
+    if (typeof flow.LLM_CHAR_DESIGN !== 'function') {
+        missing.push('LLM_CHAR_DESIGN');
+    }
+    if (missing.length) {
+        throw new Error(`Original character design flow missing exports: ${missing.join(', ')}`);
+    }
+    return flow;
+}
+
+function normalizeOriginalPromptMessages(value) {
+    if (Array.isArray(value)) {
+        return value.filter(Boolean);
+    }
+    if (typeof value === 'string') {
+        return value.trim() ? [{ role: 'user', content: value }] : [];
+    }
+    if (value && typeof value === 'object') {
+        if (Array.isArray(value.messages)) {
+            return normalizeOriginalPromptMessages(value.messages);
+        }
+        if (value.role || value.content) {
+            return [value];
+        }
+        if (value.prompt) {
+            return normalizeOriginalPromptMessages(value.prompt);
+        }
+    }
+    return [];
+}
+
+async function callOriginalTextFactory(label, factory) {
     try {
-        const raw = await executeBootstrapLlm(
-            buildBootstrapLlmPrompt(meta, request),
-            asString(settings().comfyAutoReferenceBootstrapRequestType) || BOOTSTRAP_REQUEST_TYPE,
-        );
-        return normalizeBootstrapData(parseJsonObject(raw), meta, request);
+        return asString(await factory());
     } catch (error) {
-        console.warn('[st-chatu8] Reference bootstrap LLM failed, using local fallback:', error);
-        return localBootstrapData(meta, request, error?.message || String(error));
+        console.warn(`[st-chatu8] Original character design ${label} failed:`, error);
+        return '';
     }
 }
 
-async function translatePromptToEnglish(cnPrompt, meta, request) {
-    const fallback = asString(cnPrompt) || localBootstrapData(meta, request).referencePromptEN;
+function originalCharDesignContext(meta, request, flow) {
+    let contextItems = [];
     try {
-        const raw = await executeBootstrapLlm([
-            '把下面的中文角色参考图提示词翻译并整理成英文 ComfyUI prompt。',
+        const rawContext = typeof flow.getElContext === 'function' ? flow.getElContext() : [];
+        contextItems = Array.isArray(rawContext)
+            ? rawContext.map(asString).filter(Boolean)
+            : [asString(rawContext)].filter(Boolean);
+    } catch (error) {
+        console.warn('[st-chatu8] Original character design getElContext failed:', error);
+    }
+    const fallbackBody = asString(request?.debugSourceContext || meta?.cardText || request?.prompt);
+    if (!contextItems.length && fallbackBody) {
+        contextItems = [fallbackBody];
+    }
+    const body = contextItems.length ? contextItems[contextItems.length - 1] : fallbackBody;
+    const context = contextItems.length > 1 ? contextItems.slice(0, -1).join('\n') : '';
+    return { contextItems, context, body };
+}
+
+async function buildOriginalCharDesignMessages(meta, request) {
+    const flow = await loadOriginalCharDesignFlowModules();
+    const roleName = originalCharDesignRoleName(meta, request);
+    const demand = originalCharDesignUserDemand(meta, request);
+    const { contextItems, context, body } = originalCharDesignContext(meta, request, flow);
+    const worldBookContent = await callOriginalTextFactory('world book trigger', async () => {
+        if (typeof flow.processWorldBooksWithTrigger !== 'function') {
+            return '';
+        }
+        return await flow.processWorldBooksWithTrigger([...contextItems, demand]);
+    });
+    const [characterListText, outfitEnableListText, commonCharacterListText] = await Promise.all([
+        callOriginalTextFactory('character list', async () => typeof flow.generateCharacterListText === 'function' ? await flow.generateCharacterListText() : ''),
+        callOriginalTextFactory('outfit list', async () => typeof flow.generateOutfitEnableListText === 'function' ? await flow.generateOutfitEnableListText() : ''),
+        callOriginalTextFactory('common character list', async () => typeof flow.generateCommonCharacterListText === 'function' ? await flow.generateCommonCharacterListText() : ''),
+    ]);
+    const seed = [demand, body].map(asString).filter(Boolean).join('\n');
+    let messages = normalizeOriginalPromptMessages(flow.buildPromptForRequestType(BOOTSTRAP_REQUEST_TYPE, seed));
+    if (!messages.length) {
+        throw new Error('Original character design prompt builder returned no messages.');
+    }
+    const mergeOptions = typeof flow.getMergeOptionsForRequestType === 'function'
+        ? flow.getMergeOptionsForRequestType(BOOTSTRAP_REQUEST_TYPE)
+        : {};
+    if (typeof flow.mergeAdjacentMessages === 'function') {
+        messages = normalizeOriginalPromptMessages(flow.mergeAdjacentMessages(messages, mergeOptions || {}));
+    }
+    const variables = {
+        context,
+        body,
+        worldBookContent,
+        variables: {},
+        userDemand: demand,
+        characterListText,
+        outfitEnableListText,
+        commonCharacterListText,
+    };
+    if (typeof flow.replaceAllPlaceholders === 'function') {
+        const replaced = await flow.replaceAllPlaceholders(messages, variables);
+        messages = normalizeOriginalPromptMessages(replaced?.messages || replaced);
+    }
+    if (!messages.length) {
+        throw new Error('Original character design placeholder replacement returned no messages.');
+    }
+    return { flow, messages, roleName, demand, variables };
+}
+
+async function executeOriginalCharDesignFlow(meta, request) {
+    const built = await buildOriginalCharDesignMessages(meta, request);
+    const response = await built.flow.LLM_CHAR_DESIGN(built.messages, { timeoutMs: 600000 });
+    let raw = response;
+    if (raw && typeof raw === 'object') {
+        raw = raw.result ?? raw.text ?? raw.message ?? raw.content ?? raw.output ?? raw.response ?? raw;
+        if (raw && typeof raw === 'object') {
+            raw = JSON.stringify(raw);
+        }
+    }
+    raw = asString(raw);
+    if (!raw) {
+        throw new Error('Original character design flow returned an empty response.');
+    }
+    return {
+        raw,
+        roleName: built.roleName,
+        demand: built.demand,
+        variables: built.variables,
+    };
+}
+
+async function generateBootstrapData(meta, request) {
+    let originalFlowError = null;
+    try {
+        const original = await executeOriginalCharDesignFlow(meta, request);
+        const data = normalizeBootstrapOutput(original.raw, meta, request);
+        data.originalCharDesignSubmittedBy = 'original_confirm_flow';
+        data.originalCharDesignRoleName = original.roleName;
+        data.originalCharDesignUserDemand = original.demand;
+        return data;
+    } catch (error) {
+        originalFlowError = error;
+        console.warn('[st-chatu8] Original character design confirm flow failed, using bootstrap prompt fallback:', error);
+    }
+    try {
+        const raw = await executeBootstrapLlmWithFallback(
+            buildBootstrapLlmPrompt(meta, request),
+            [bootstrapGenerateRequestType(), BOOTSTRAP_REQUEST_TYPE],
+        );
+        const data = normalizeBootstrapOutput(raw, meta, request);
+        data.originalCharDesignSubmittedBy = 'bootstrap_prompt_fallback';
+        data.originalCharDesignRoleName = originalCharDesignRoleName(meta, request);
+        data.originalCharDesignUserDemand = originalCharDesignUserDemand(meta, request);
+        return data;
+    } catch (error) {
+        console.warn('[st-chatu8] Reference bootstrap LLM failed, using local fallback:', error);
+        const reasons = [
+            originalFlowError ? `original flow: ${originalFlowError?.message || originalFlowError}` : '',
+            `bootstrap fallback: ${error?.message || error}`,
+        ].filter(Boolean).join('; ');
+        return localBootstrapData(meta, request, reasons);
+    }
+}
+
+async function translatePromptToEnglish(cnPrompt, meta, request, previousPrompt = '') {
+    const localData = localBootstrapData(meta, request);
+    updateBootstrapDataFromDesignText(localData, cnPrompt, meta, request);
+    const cleanDesignPrompt = stripReasoningBlocks(cnPrompt);
+    const structuredFallback = sanitizeEnglishPrompt(localData.referencePromptEN, localBootstrapData(meta, request).referencePromptEN);
+    const fallback = sanitizeEnglishPrompt(previousPrompt, structuredFallback);
+    const configuredSystemPrompt = characterReferenceSystemPrompt();
+    const modelProfileText = referencePromptModelProfileText();
+    try {
+        const translatePrompt = [
+            configuredSystemPrompt ? `用户配置的角色首参考图系统提示词：\n${configuredSystemPrompt}` : '',
+            modelProfileText,
+            configuredSystemPrompt ? '如果用户配置系统提示词和当前 ComfyUI 工作流模型规则冲突，以当前 ComfyUI 工作流模型规则为准。' : '',
+            '把下面的原插件角色/服装设定稿整理成英文 ComfyUI prompt。',
+            '必须保留角色身份、外貌、服装和参考图构图规则；不要把中文字段名或中文原文直接复制到英文 prompt。',
+            '参考图必须是角色设定图：正面全身、自然站姿、白底或干净背景、均匀光照；禁止写剧情场景、床/马车/火炉等临时环境、暧昧氛围、镜头角度、动作戏、纯数字残片。',
             '只输出 JSON：{"promptEN":"..."}，不要 Markdown。',
             `角色名：${meta.displayName}`,
-            `中文提示词：${fallback}`,
-        ].join('\n'), asString(settings().comfyAutoReferenceBootstrapRequestType) || BOOTSTRAP_REQUEST_TYPE);
+            `角色/服装设定稿：${cleanDesignPrompt}`,
+            `当前英文提示词：${fallback}`,
+        ].filter(Boolean).join('\n');
+        const raw = await executeBootstrapLlmWithFallback(translatePrompt, [
+            bootstrapTranslateRequestType(),
+            bootstrapGenerateRequestType(),
+            BOOTSTRAP_TRANSLATE_REQUEST_TYPE,
+            BOOTSTRAP_REQUEST_TYPE,
+        ]);
         const parsed = parseJsonObject(raw);
-        return asString(parsed.promptEN || parsed.prompt || parsed.referencePromptEN) || fallback;
+        const translated = asString(parsed.promptEN || parsed.prompt || parsed.referencePromptEN);
+        const safeTranslated = sanitizeEnglishPrompt(translated, fallback);
+        if (!safeTranslated || containsCjk(safeTranslated) || translated === asString(cnPrompt)) {
+            throw new Error('翻译结果为空或仍为中文原文。');
+        }
+        return safeTranslated;
     } catch (error) {
         console.warn('[st-chatu8] Reference prompt translation failed:', error);
-        return fallback;
+        if (structuredFallback && !containsCjk(structuredFallback)) {
+            return structuredFallback;
+        }
+        const wrapped = new Error(`翻译/整理失败：${error?.message || String(error)}`);
+        wrapped.cause = error;
+        wrapped.stChatu8KeepExistingPrompt = true;
+        throw wrapped;
     }
 }
 
@@ -712,21 +2033,29 @@ function runBootstrapComfyRequest(payload) {
 async function generateNoReferenceImage(prompt, request) {
     const dimensions = bootstrapDimensions(request);
     const selectedBootstrapWorkerId = bootstrapWorkerId();
+    const useCurrentWorkflowNoReference = !selectedBootstrapWorkerId;
+    const safePrompt = sanitizeEnglishPrompt(
+        prompt,
+        defaultEnglishReferencePrompt(englishAliasFromValues([request?.referenceCharacterName]) || 'the current character'),
+    );
+    if (!safePrompt || containsCjk(safePrompt)) {
+        throw new Error('英文生图提示词仍包含中文或为空，请先翻译/整理后再生成。');
+    }
     const payload = {
         id: `chatu8_reference_bootstrap:${Date.now()}:${Math.random().toString(36).slice(2)}`,
-        prompt,
+        prompt: safePrompt,
         width: dimensions.width,
         height: dimensions.height,
         negative_prompt: 'low quality, worst quality, bad anatomy, bad hands, extra fingers, missing fingers, watermark, text, logo, blurry',
         seed: undefined,
         mode: 'reference_bootstrap',
-        change: selectedBootstrapWorkerId ? 'st_chatu8_reference_bootstrap selected_worker_first_image' : 'st_chatu8_reference_bootstrap current_worker_first_image',
-        workflowAdapter: undefined,
-        stChatu8NoReferenceBootstrap: false,
+        change: selectedBootstrapWorkerId ? 'st_chatu8_reference_bootstrap selected_worker_first_image' : 'st_chatu8_reference_bootstrap current_worker_no_reference_first_image',
+        workflowAdapter: useCurrentWorkflowNoReference ? 'flux2-klein-no-reference-bootstrap' : undefined,
+        stChatu8NoReferenceBootstrap: useCurrentWorkflowNoReference,
         stChatu8BootstrapWorkerId: selectedBootstrapWorkerId,
         debugPromptRaw: request?.debugPromptRaw || request?.prompt || '',
-        debugPromptOptimized: prompt,
-        debugPromptFinal: prompt,
+        debugPromptOptimized: safePrompt,
+        debugPromptFinal: safePrompt,
     };
     return runBootstrapComfyRequest(payload);
 }
@@ -835,6 +2164,17 @@ function uniquePresetId(base, collection) {
     return `${clean} ${index}`;
 }
 
+function originalDesignScopePrefix(meta) {
+    const contextName = asString(meta?.context?.name2 || meta?.context?.characterName);
+    return contextName ? `[${contextName}]` : '';
+}
+
+function originalDesignPresetBase(name, meta) {
+    const clean = asString(name, '自动角色');
+    const prefix = originalDesignScopePrefix(meta);
+    return prefix && !clean.startsWith(prefix) ? `${prefix}${clean}` : clean;
+}
+
 function bindReferencePath(meta, bootstrapData, referencePath, finalPrompt) {
     const data = settings();
     if (!data.characterPresets || typeof data.characterPresets !== 'object' || Array.isArray(data.characterPresets)) {
@@ -845,8 +2185,10 @@ function bindReferencePath(meta, bootstrapData, referencePath, finalPrompt) {
     }
 
     const existing = findCurrentCharacterPreset(meta, false);
-    const presetId = existing?.presetId || uniquePresetId(meta.displayName, data.characterPresets);
+    const presetBase = originalDesignPresetBase(bootstrapData.nameCN || bootstrapData.nameEN || meta.displayName, meta);
+    const presetId = existing?.presetId || uniquePresetId(presetBase, data.characterPresets);
     const preset = existing?.preset || {};
+    const safeFinalPrompt = sanitizeEnglishPrompt(finalPrompt, bootstrapData.referencePromptEN || preset.photoPrompt || defaultEnglishReferencePrompt());
     mergeIfEmpty(preset, {
         nameCN: bootstrapData.nameCN || meta.displayName,
         nameEN: bootstrapData.nameEN || meta.displayName,
@@ -874,23 +2216,27 @@ function bindReferencePath(meta, bootstrapData, referencePath, finalPrompt) {
         bootstrapData.upperBodySFW,
         bootstrapData.fullBodySFW,
     ].map(asString).filter(Boolean).join(', ');
-    preset.photoPrompt = asString(finalPrompt || bootstrapData.referencePromptEN || preset.photoPrompt);
+    preset.photoPrompt = safeFinalPrompt || asString(bootstrapData.referencePromptEN || preset.photoPrompt);
     preset.autoReferenceGeneratedAt = new Date().toISOString();
+    preset.originalCharDesignText = asString(bootstrapData.stChatu8DesignText || preset.originalCharDesignText);
 
     const outfit = bootstrapData.outfit || {};
-    const outfitBase = `${presetId}${asString(outfit.nameCN || outfit.nameEN || '默认参考服装')}`;
+    const outfitBase = originalDesignPresetBase(outfit.nameCN || outfit.nameEN || '默认参考服装', meta);
     const outfitId = Object.keys(data.outfitPresets).find((id) => id === outfitBase) || uniquePresetId(outfitBase, data.outfitPresets);
     const outfitPreset = data.outfitPresets[outfitId] || {};
     mergeIfEmpty(outfitPreset, {
         nameCN: outfit.nameCN || '默认参考服装',
         nameEN: outfit.nameEN || 'default reference outfit',
-        owner: preset.nameEN || preset.nameCN || meta.displayName,
+        owner: outfit.owner || preset.nameCN || preset.nameEN || meta.displayName,
+        style: outfit.style,
+        color: outfit.color,
+        material: outfit.material,
         upperBody: outfit.upperBody,
         upperBodyBack: outfit.upperBodyBack,
         fullBody: outfit.fullBody,
         fullBodyBack: outfit.fullBodyBack,
-    }, ['nameCN', 'nameEN', 'owner', 'upperBody', 'upperBodyBack', 'fullBody', 'fullBodyBack']);
-    outfitPreset.photoPrompt = asString(finalPrompt || outfitPreset.photoPrompt);
+    }, ['nameCN', 'nameEN', 'owner', 'style', 'color', 'material', 'upperBody', 'upperBodyBack', 'fullBody', 'fullBodyBack']);
+    outfitPreset.photoPrompt = safeFinalPrompt || asString(outfitPreset.photoPrompt);
     data.outfitPresets[outfitId] = outfitPreset;
 
     if (!Array.isArray(preset.outfits)) {
@@ -904,7 +2250,94 @@ function bindReferencePath(meta, bootstrapData, referencePath, finalPrompt) {
     data.characterEnablePresetId = presetId;
     data.outfitPresetId = outfitId;
     saveSettingsDebounced();
-    return { presetId, outfitId, referencePath };
+    return { presetId, outfitId, referencePath, characterName: meta.displayName };
+}
+
+function bootstrapSessionKey(meta) {
+    return normalizeName(meta?.displayName || meta?.names?.[0] || '');
+}
+
+function bootstrapDesignIdentityName(bootstrapData) {
+    const candidates = uniqueStrings([
+        bootstrapData?.nameCN,
+        bootstrapData?.nameEN,
+        bootstrapData?.outfit?.owner,
+    ]);
+    for (const candidate of candidates) {
+        const cleaned = cleanExtractedCharacterName(candidate) || asString(candidate);
+        if (cleaned && cleaned !== '新角色' && cleaned !== '当前角色' && isLooseCharacterNameCandidate(cleaned)) {
+            return cleaned;
+        }
+    }
+    return '';
+}
+
+function isWeakBootstrapIdentity(meta) {
+    const displayName = asString(meta?.displayName);
+    const requestNames = Array.isArray(meta?.requestNames) ? meta.requestNames : [];
+    if (!displayName || displayName === '当前角色' || displayName === '新角色') {
+        return true;
+    }
+    if (isDescriptiveCharacterFragment(displayName)) {
+        return true;
+    }
+    if (meta?.requestCharacterSource === 'unresolved' || !requestNames.length) {
+        return true;
+    }
+    return requestNames.every((name) => isDescriptiveCharacterFragment(name));
+}
+
+function metaWithBootstrapIdentity(meta, bootstrapData) {
+    if (!isWeakBootstrapIdentity(meta)) {
+        return meta;
+    }
+    const identityName = bootstrapDesignIdentityName(bootstrapData);
+    if (!identityName) {
+        return meta;
+    }
+    return {
+        ...meta,
+        displayName: identityName,
+        names: uniqueStrings([identityName, bootstrapData?.nameEN, ...(Array.isArray(meta?.names) ? meta.names : [])]),
+        requestNames: uniqueStrings([identityName, bootstrapData?.nameEN, ...(Array.isArray(meta?.requestNames) ? meta.requestNames : [])]),
+        requestCharacterSource: meta?.requestCharacterSource === 'unresolved' ? 'bootstrap_design' : meta?.requestCharacterSource,
+        requestCharacterCandidates: uniqueStrings([identityName, ...(Array.isArray(meta?.requestCharacterCandidates) ? meta.requestCharacterCandidates : [])]),
+        hasCurrentCharacter: true,
+    };
+}
+
+async function currentReadyReferenceResult(meta) {
+    const current = findCurrentCharacterPreset(meta, true);
+    if (!current?.path || !(await comfyInputImageExists(current.path))) {
+        return null;
+    }
+    const outfits = Array.isArray(current.preset?.outfits) ? current.preset.outfits : [];
+    return {
+        presetId: current.presetId,
+        outfitId: outfits.map(asString).find(Boolean) || '',
+        referencePath: current.path,
+        source: 'current_character_preset',
+    };
+}
+
+function applyBootstrapResultToRequest(request, result) {
+    if (!result?.referencePath) {
+        return request;
+    }
+    return {
+        ...request,
+        comfyuicankaotupian: result.referencePath,
+        comfyui_reference_image: result.referencePath,
+        referenceImage: result.referencePath,
+        debugReferenceBootstrap: {
+            presetId: result.presetId,
+            outfitId: result.outfitId,
+            referencePath: result.referencePath,
+            source: result.source || '',
+            characterName: result.characterName || '',
+            version: BOOTSTRAP_VERSION,
+        },
+    };
 }
 
 function addStyle() {
@@ -1084,8 +2517,8 @@ function showBootstrapDialog(meta, request, bootstrapData) {
                 </div>
                 <div class="st-chatu8-refboot-body">
                     <div class="st-chatu8-refboot-fields">
-                        <label class="st-chatu8-refboot-label">中文设定稿
-                            <textarea class="st-chatu8-refboot-textarea st-chatu8-refboot-cn">${escapeHtml(bootstrapData.referencePromptCN)}</textarea>
+                        <label class="st-chatu8-refboot-label">角色/服装设定稿
+                            <textarea class="st-chatu8-refboot-textarea st-chatu8-refboot-cn">${escapeHtml(bootstrapData.stChatu8DesignText || bootstrapData.referencePromptCN)}</textarea>
                         </label>
                         <label class="st-chatu8-refboot-label">英文生图提示词
                             <textarea class="st-chatu8-refboot-textarea st-chatu8-refboot-en">${escapeHtml(bootstrapData.referencePromptEN)}</textarea>
@@ -1156,13 +2589,19 @@ function showBootstrapDialog(meta, request, bootstrapData) {
         };
         document.addEventListener('keydown', onKeyDown);
         translate.addEventListener('click', async () => {
+            const previousPrompt = asString(en.value);
             try {
                 setBusy(true);
                 setStatus('正在翻译并整理提示词...');
-                en.value = await translatePromptToEnglish(cn.value, meta, request);
+                updateBootstrapDataFromDesignText(bootstrapData, cn.value, meta, request);
+                const nextPrompt = await translatePromptToEnglish(cn.value, meta, request, previousPrompt);
+                if (nextPrompt) {
+                    en.value = nextPrompt;
+                }
                 setStatus('提示词已更新，可以生成首图。', 'ok');
             } catch (error) {
-                setStatus(error?.message || String(error), 'error');
+                en.value = sanitizeEnglishPrompt(previousPrompt, bootstrapData.referencePromptEN);
+                setStatus(`${error?.message || String(error)}；已保留原英文提示词。`, 'error');
             } finally {
                 if (!closed) {
                     setBusy(false);
@@ -1173,6 +2612,7 @@ function showBootstrapDialog(meta, request, bootstrapData) {
             try {
                 setBusy(true);
                 setStatus('正在用无参考工作流生成首图...');
+                en.value = sanitizeEnglishPrompt(en.value, bootstrapData.referencePromptEN);
                 generatedResponse = await generateNoReferenceImage(asString(en.value), request);
                 const imageUrl = normalizeMediaUrl(generatedResponse);
                 preview.innerHTML = imageUrl ? `<img alt="reference preview" src="${escapeHtml(imageUrl)}">` : '<span>生成完成，但没有预览数据</span>';
@@ -1196,6 +2636,7 @@ function showBootstrapDialog(meta, request, bootstrapData) {
             try {
                 setBusy(true);
                 setStatus('正在上传并绑定到当前角色...');
+                updateBootstrapDataFromDesignText(bootstrapData, cn.value, meta, request);
                 const referencePath = await saveGeneratedReferenceToLocalPath(generatedResponse, meta);
                 const result = bindReferencePath(meta, bootstrapData, referencePath, asString(en.value));
                 cleanup();
@@ -1217,43 +2658,141 @@ export async function ensureComfyReferenceBootstrap(request, context = {}) {
     }
     syncBootstrapWorkerSelect();
     const meta = await currentCharacterMeta(request);
-    const referenceProblem = await getReferenceProblem(request, meta);
+    const gate = referenceBootstrapGate(request, meta);
+    context?.traceEvent?.(context.trace, 'reference_bootstrap:gate', gate, false);
+    if (gate?.allowed) {
+        const readyReference = await currentReadyReferenceResult(meta);
+        if (readyReference?.referencePath) {
+            context?.traceEvent?.(context.trace, 'reference_bootstrap:ready_reference', {
+                character: meta.displayName,
+                preset_id: readyReference.presetId,
+                outfit_id: readyReference.outfitId,
+                reference_path: readyReference.referencePath,
+                source: readyReference.source,
+            }, false);
+            context?.traceStep?.(context.trace, 'workflow', 'done', {
+                reference_bootstrap: 'ready_reference',
+                character: meta.displayName,
+                preset_id: readyReference.presetId,
+                outfit_id: readyReference.outfitId,
+                reference_path: readyReference.referencePath,
+                gate,
+            });
+            return applyBootstrapResultToRequest(request, readyReference);
+        }
+    }
+    const referenceProblem = await getReferenceProblem(request, meta, gate);
     if (!referenceProblem) {
+        context?.traceEvent?.(context.trace, 'reference_bootstrap:skipped', {
+            reason: referenceBootstrapSkipReason(gate),
+            ...gate,
+        }, false);
         return request;
     }
     context?.traceStep?.(context.trace, 'workflow', 'running', {
         reference_bootstrap: referenceProblem.reason,
         character: meta.displayName,
         reference_paths: referenceProblem.paths,
+        preset_id: referenceProblem.preset_id || '',
+        gate,
     });
-    const bootstrapData = await generateBootstrapData(meta, request);
+
+    const sessionKey = bootstrapSessionKey(meta);
+    const existingSession = sessionKey ? bootstrapSessionByCharacter.get(sessionKey) : null;
+    if (existingSession?.status === 'bound' && existingSession?.result?.referencePath) {
+        context?.traceStep?.(context.trace, 'workflow', 'done', {
+            reference_bootstrap: 'reused_bound_reference',
+            character: existingSession.result.characterName || meta.displayName,
+            preset_id: existingSession.result.presetId,
+            outfit_id: existingSession.result.outfitId,
+            reference_path: existingSession.result.referencePath,
+        });
+        return applyBootstrapResultToRequest(request, existingSession.result);
+    }
+    if (existingSession?.promise) {
+        context?.traceStep?.(context.trace, 'workflow', 'running', {
+            reference_bootstrap: 'waiting_existing_character_dialog',
+            character: meta.displayName,
+            session_key: sessionKey,
+        });
+        try {
+            const result = await existingSession.promise;
+            return applyBootstrapResultToRequest(request, result);
+        } catch (error) {
+            if (error?.stChatu8Canceled || error?.name === 'AbortError') {
+                context?.traceStep?.(context.trace, 'workflow', 'skipped', {
+                    reference_bootstrap: 'canceled_existing_character_dialog',
+                    character: meta.displayName,
+                });
+                return request;
+            }
+            throw error;
+        }
+    }
+
+    const sessionPromise = (async () => {
+        const bootstrapData = await generateBootstrapData(meta, request);
+        const dialogMeta = metaWithBootstrapIdentity(meta, bootstrapData);
+        if (dialogMeta !== meta) {
+            context?.traceEvent?.(context.trace, 'reference_bootstrap:identity_from_design', {
+                before: meta.displayName,
+                after: dialogMeta.displayName,
+                source: dialogMeta.requestCharacterSource || '',
+            }, false);
+        }
+        return showBootstrapDialog(dialogMeta, request, bootstrapData);
+    })();
+    if (sessionKey) {
+        bootstrapSessionByCharacter.set(sessionKey, {
+            status: 'dialog_open',
+            promise: sessionPromise,
+            result: null,
+        });
+    }
+
     let result;
     try {
-        result = await showBootstrapDialog(meta, request, bootstrapData);
+        result = await sessionPromise;
     } catch (error) {
         if (error?.stChatu8Canceled || error?.name === 'AbortError') {
+            if (sessionKey) {
+                bootstrapSessionByCharacter.set(sessionKey, {
+                    status: 'canceled',
+                    promise: null,
+                    result: null,
+                });
+            }
             context?.traceStep?.(context.trace, 'workflow', 'skipped', {
                 reference_bootstrap: 'canceled',
                 character: meta.displayName,
+                session_key: sessionKey,
             });
             return request;
         }
+        if (sessionKey) {
+            bootstrapSessionByCharacter.set(sessionKey, {
+                status: 'failed',
+                promise: null,
+                result: null,
+                error: error?.message || String(error),
+            });
+        }
         throw error;
+    }
+    if (sessionKey) {
+        bootstrapSessionByCharacter.set(sessionKey, {
+            status: 'bound',
+            promise: null,
+            result,
+        });
     }
     context?.traceStep?.(context.trace, 'workflow', 'done', {
         reference_bootstrap: 'bound',
-        character: meta.displayName,
+        character: result.characterName || meta.displayName,
         preset_id: result.presetId,
         outfit_id: result.outfitId,
         reference_path: result.referencePath,
+        session_key: sessionKey,
     });
-    return {
-        ...request,
-        debugReferenceBootstrap: {
-            presetId: result.presetId,
-            outfitId: result.outfitId,
-            referencePath: result.referencePath,
-            version: BOOTSTRAP_VERSION,
-        },
-    };
+    return applyBootstrapResultToRequest(request, result);
 }

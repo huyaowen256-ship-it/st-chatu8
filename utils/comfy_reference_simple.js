@@ -2,7 +2,7 @@ import { saveSettingsDebounced } from '../../../../../script.js';
 import { extension_settings } from '../../../../extensions.js';
 import { extensionName } from './config.js';
 
-const SIMPLE_VERSION = '20260518_character_reference_workflow_v1';
+const SIMPLE_VERSION = '20260521_character_reference_workflow_split_v1';
 const SIMPLE_PRESET_NAME = 'Flux2 Klein 一致性 LoRA';
 const ONEOBSESSION_PRESET_NAME = 'oneObsession IPAdapter 低权重中文模板';
 const DEFAULT_PRESET_NAME = ONEOBSESSION_PRESET_NAME;
@@ -202,14 +202,14 @@ function workflowSourceText() {
     return `当前工作流预设：${activePresetName()}`;
 }
 
-function characterReferenceWorkflowName(fallback = activePresetName()) {
+function characterReferenceWorkflowName(fallback = '') {
     const data = settings();
-    return asString(data.comfyCharacterReferenceWorkerId || data.editWorkerid || fallback);
+    return asString(data.editWorkerid || data.comfyCharacterReferenceWorkerId || data.comfyAutoReferenceBootstrapWorkerId || fallback);
 }
 
-function characterReferenceWorkflowText(fallback = activeWorkflowText()) {
+function characterReferenceWorkflowText(fallback = '') {
     const data = settings();
-    return asString(data.comfyCharacterReferenceWorker || data.editWorker || fallback);
+    return asString(data.editWorker || data.comfyCharacterReferenceWorker || fallback);
 }
 
 function syncCharacterReferenceWorkflowSettingsFromDom(save = true) {
@@ -223,6 +223,7 @@ function syncCharacterReferenceWorkflowSettingsFromDom(save = true) {
     if (name) {
         changed = assign(data, 'editWorkerid', name) || changed;
         changed = assign(data, 'comfyCharacterReferenceWorkerId', name) || changed;
+        changed = assign(data, 'comfyAutoReferenceBootstrapWorkerId', name) || changed;
     }
     if (workflowText) {
         changed = assign(data, 'editWorker', workflowText) || changed;
@@ -241,15 +242,14 @@ function applyActiveWorkflow(name, workflowText, save = true) {
 
     changed = assign(data, 'workerid', name) || changed;
     changed = assign(data, 'worker', workflowText) || changed;
-    const referenceWorkflowName = characterReferenceWorkflowName(name || CHARACTER_REFERENCE_WORKFLOW_NAME);
-    const referenceWorkflowText = characterReferenceWorkflowText(workflowText);
-    changed = assign(data, 'comfyCharacterReferenceWorkerId', referenceWorkflowName) || changed;
-    changed = assign(data, 'comfyCharacterReferenceWorker', referenceWorkflowText) || changed;
-    if (!asString(data.editWorkerid)) {
-        changed = assign(data, 'editWorkerid', referenceWorkflowName) || changed;
+    const referenceWorkflowName = characterReferenceWorkflowName();
+    const referenceWorkflowText = characterReferenceWorkflowText();
+    if (referenceWorkflowName) {
+        changed = assign(data, 'comfyCharacterReferenceWorkerId', referenceWorkflowName) || changed;
+        changed = assign(data, 'comfyAutoReferenceBootstrapWorkerId', referenceWorkflowName) || changed;
     }
-    if (!asString(data.editWorker)) {
-        changed = assign(data, 'editWorker', referenceWorkflowText) || changed;
+    if (referenceWorkflowText) {
+        changed = assign(data, 'comfyCharacterReferenceWorker', referenceWorkflowText) || changed;
     }
     changed = assign(data, 'comfyWorkflowAdapter', WORKFLOW_ADAPTER) || changed;
     changed = assign(data, 'comfyFlux2KleinEnabled', true) || changed;
