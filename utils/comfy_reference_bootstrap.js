@@ -7,13 +7,36 @@ import { resolveComfyCharacterReferences } from './characterprompt.js';
 import { executeTypedLLMRequest } from './settings/llmService.js';
 import { extractCharacterAndOutfitTags } from './newline_fix.js';
 
-const BOOTSTRAP_VERSION = '20260522_refboot_identity_save_v1';
+const BOOTSTRAP_VERSION = '20260522_single_front_reference_v1';
 const BOOTSTRAP_REQUEST_TYPE = 'char_design';
 const BOOTSTRAP_TRANSLATE_REQUEST_TYPE = 'translation';
 const BOOTSTRAP_WORKER_SELECT_ID = 'comfyAutoReferenceBootstrapWorkerId';
 const BOOTSTRAP_TIMEOUT_MS = 8 * 60 * 1000;
 const AUTO_REFERENCE_DIR = 'D:\\jiuguan\\角色';
 const AUTO_REFERENCE_SAVE_ENDPOINT = '/api/plugins/st-chatu8/save-reference-image';
+const REFERENCE_BOOTSTRAP_NEGATIVE_PROMPT = [
+    'low quality',
+    'worst quality',
+    'bad anatomy',
+    'bad hands',
+    'extra fingers',
+    'missing fingers',
+    'watermark',
+    'text',
+    'logo',
+    'blurry',
+    'multiple views',
+    'turnaround',
+    'character sheet',
+    'reference sheet',
+    'split screen',
+    'grid layout',
+    'comic panels',
+    'side view',
+    'back view',
+    'duplicate character',
+    'extra body',
+].join(', ');
 
 let activeDialogPromise = null;
 const bootstrapSessionByCharacter = new Map();
@@ -163,7 +186,8 @@ function referencePromptModelProfile() {
                 '当前首参考图工作流是 One Obsession / Illustrious / NoobAI 系模型，不是 Anima。',
                 '使用英文 Danbooru tag 为主，允许少量短自然语言补充；不要写长段摄影式自然语言。',
                 '正向开头使用：masterpiece, best quality, amazing quality, very awa, very aesthetic, newest, safe, 1girl, solo。',
-                '角色参考图需要：full body, standing, front view, looking at viewer, neutral expression, arms relaxed, character reference sheet, plain white background。',
+                '角色首参考图只要单张正面全身立绘：full body, standing, front view, looking at viewer, neutral expression, arms relaxed, plain white background。',
+                '不要写 character reference sheet / model sheet / turnaround / multiple views；这些词会诱发三视图、拼图和设定表。',
                 '人物、发色、眼睛、体型、服装、材质、颜色、配饰都拆成逗号 tag；不要只写衣服名。',
                 '避免 photorealistic/photo/realistic，除非用户明确要半写实；避免剧情场景、床、马车、火炉、暧昧氛围、镜头角度。',
                 '末尾可加：absurdres, highres。',
@@ -419,6 +443,12 @@ function englishPromptSegments(value) {
             if (/^[\d\s.,;:()_-]+$/.test(segment)) {
                 return false;
             }
+            if (/\b(?:character\s+sheet|reference\s+sheet|model\s+sheet|turnaround|multiple\s+views|multi[-\s]?view|three[-\s]?views?|3[-\s]?views?|split\s+screen|grid\s+layout|comic\s+panels?)\b/i.test(segment)) {
+                return false;
+            }
+            if (/^default reference outfit$/i.test(segment)) {
+                return false;
+            }
             return !/^(?:type|subject|highlight|angle|character|pose(?:\s*&\s*action)?|action|clothing|extra\s+details|environment|scene|background)\s*:/i.test(segment);
         });
 }
@@ -452,7 +482,8 @@ function defaultEnglishReferencePrompt(name = 'the current character') {
             sanitizeEnglishPrompt(name) || 'the current character',
             'full body, standing, front view, looking at viewer',
             'neutral expression, arms relaxed',
-            'character reference sheet, plain white background',
+            'single character, single view only, centered composition',
+            'plain white background, no scenery',
             'detailed face, clear eyes, coherent anatomy',
             'absurdres, highres',
         ].filter(Boolean).join(', ');
@@ -460,8 +491,9 @@ function defaultEnglishReferencePrompt(name = 'the current character') {
     return [
         'sfw',
         'solo character',
-        'full body character reference sheet',
+        'single full-body character portrait',
         'standing, front view, neutral pose, neutral expression, arms relaxed',
+        'one front-facing view only, centered composition',
         'plain white background, soft even lighting, no scenery',
         'detailed face, clear eyes, coherent anatomy',
         sanitizeEnglishPrompt(name) || 'the current character',
@@ -674,7 +706,7 @@ function buildOriginalCharDesignText(data, meta) {
     const nameCN = asString(data?.nameCN || meta?.displayName, '当前角色');
     const nameEN = asString(data?.nameEN || englishAliasFromValues([...(meta?.requestNames || []), ...(meta?.currentNames || []), meta?.displayName]), 'Current Character');
     const outfitNameCN = asString(outfit.nameCN, '默认参考服装');
-    const outfitNameEN = asString(outfit.nameEN, 'default reference outfit');
+    const outfitNameEN = asString(outfit.nameEN);
     return [
         '<人物>',
         originalDesignLine('中文名称', nameCN),
@@ -1536,10 +1568,10 @@ function localBootstrapData(meta, request, warning = '') {
         upperBodyNSFWBack: '',
         fullBodyNSFW: '',
         fullBodyNSFWBack: '',
-        negative: 'low quality, worst quality, bad anatomy, extra fingers, missing fingers, watermark, text, logo, blurry',
+        negative: REFERENCE_BOOTSTRAP_NEGATIVE_PROMPT,
         outfit: {
             nameCN: '默认参考服装',
-            nameEN: 'default reference outfit',
+            nameEN: '',
             style: '',
             color: '',
             material: '',
@@ -1678,8 +1710,8 @@ function buildBootstrapLlmPrompt(meta, request) {
             original_char_design_role_name: 'This is the resolved role name. It is the only source of truth for 中文名称/nameCN.',
             original_char_design_user_demand: 'This is the exact sentence that would be typed into the original plugin step-2 popup.',
             image_anchor_prompt: 'Auxiliary visual context only. Never use it as the role name or as the main generation demand.',
-            referencePromptEN: 'English-only ComfyUI prompt, comma separated, suitable for a no-reference first image. Do not copy Chinese source text into this field.',
-            reference_image_goal: 'sfw solo full-body front-view character reference image, clean background, stable clothing and facial traits',
+            referencePromptEN: 'English-only ComfyUI prompt, comma separated, suitable for a no-reference first image. Do not copy Chinese source text into this field. Do not write reference sheet, model sheet, turnaround, multiple views, split screen, or grid layout.',
+            reference_image_goal: 'single sfw solo full-body front-view character portrait, one view only, clean background, stable clothing and facial traits',
         },
         original_char_design_role_name: designRoleName,
         original_char_design_user_demand: designUserDemand,
@@ -1705,6 +1737,7 @@ function buildBootstrapLlmPrompt(meta, request) {
         'stChatu8DesignText 必须使用 <人物>/<服装> 标签和 Input JSON 里的精确中文字段名；不能使用 <角色>，不能省略中文名称。',
         'image_anchor_prompt / image_anchor_frame_prompt 只可作为外貌或服装参考线索，不能覆盖上面的角色名，也不要把场景、姿势、镜头写进角色名。',
         'referencePromptEN 必须只含英文逗号短语，不要 Type/Subject/Highlight 等中文设定字段名，也不要复制任何中文。',
+        'referencePromptEN 必须生成单张正面全身立绘；禁止使用 reference sheet、character sheet、model sheet、turnaround、multiple views、split screen、grid layout、side view、back view 等会诱发三视图/多视角/拼图的词。',
         '如果角色卡没有明确写出外貌，请保守推断，并在 warnings 里说明。',
         '',
         'Input JSON:',
@@ -1953,7 +1986,7 @@ async function translatePromptToEnglish(cnPrompt, meta, request, previousPrompt 
             configuredSystemPrompt ? '如果用户配置系统提示词和当前 ComfyUI 工作流模型规则冲突，以当前 ComfyUI 工作流模型规则为准。' : '',
             '把下面的原插件角色/服装设定稿整理成英文 ComfyUI prompt。',
             '必须保留角色身份、外貌、服装和参考图构图规则；不要把中文字段名或中文原文直接复制到英文 prompt。',
-            '参考图必须是角色设定图：正面全身、自然站姿、白底或干净背景、均匀光照；禁止写剧情场景、床/马车/火炉等临时环境、暧昧氛围、镜头角度、动作戏、纯数字残片。',
+            '参考图必须是单张角色正面全身立绘：自然站姿、一个人物、一个正面视角、白底或干净背景、均匀光照；禁止写 reference sheet、character sheet、model sheet、turnaround、multiple views、split screen、grid layout、side view、back view，以及剧情场景、床/马车/火炉等临时环境、暧昧氛围、镜头角度、动作戏、纯数字残片。',
             '只输出 JSON：{"promptEN":"..."}，不要 Markdown。',
             `角色名：${meta.displayName}`,
             `角色/服装设定稿：${cleanDesignPrompt}`,
@@ -2064,7 +2097,7 @@ async function generateNoReferenceImage(prompt, request) {
         prompt: safePrompt,
         width: dimensions.width,
         height: dimensions.height,
-        negative_prompt: 'low quality, worst quality, bad anatomy, bad hands, extra fingers, missing fingers, watermark, text, logo, blurry',
+        negative_prompt: REFERENCE_BOOTSTRAP_NEGATIVE_PROMPT,
         seed: undefined,
         mode: 'reference_bootstrap',
         change: selectedBootstrapWorkerId ? 'st_chatu8_reference_bootstrap selected_worker_first_image' : 'st_chatu8_reference_bootstrap current_worker_no_reference_first_image',
