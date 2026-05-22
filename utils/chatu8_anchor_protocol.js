@@ -15,7 +15,7 @@ import {
     KLEIN_PROMPT_OPTIMIZER_REQUEST_TYPE,
     optimizeKleinPromptIfNeeded,
 } from './comfy_prompt_optimizer.js';
-import { ensureComfyReferenceBootstrap } from './comfy_reference_bootstrap.js?v=20260521_mobile_refboot_dialog_v1';
+import { ensureComfyReferenceBootstrap } from './comfy_reference_bootstrap.js?v=20260522_refboot_identity_save_v1';
 
 const ANCHOR_PREFIX = 'chatu8_img';
 const RESULT_PREFIX = 'chatu8_img_result';
@@ -26,7 +26,7 @@ const IMAGE_TEXT_OPEN = 'image###';
 const IMAGE_TEXT_CLOSE = '###';
 const DEFAULT_MAX_ANCHORS = 5;
 const DEFAULT_TIMEOUT_MS = 8 * 60 * 1000;
-const TRACE_VERSION = '20260521_mobile_refboot_dialog_v1';
+const TRACE_VERSION = '20260522_refboot_identity_save_v1';
 const TRACE_LOG_LIMIT = 30;
 const TRACE_DETAIL_STRING_LIMIT = 4000;
 const ERROR_RETRY_PROMPT_LIMIT = 12000;
@@ -2480,9 +2480,27 @@ function findAliasIndex(text, alias) {
     return -1;
 }
 
+function isActionOrClothingPhrase(value) {
+    const text = safeString(value);
+    const compact = text.replace(/\s+/g, '');
+    if (!compact) {
+        return false;
+    }
+    if (/^(?:穿|换|换上|换成|身穿|穿着|拿着|坐|站|躺|看|笑|哭|跑|走|去|在|做|摆)/.test(compact)) {
+        return true;
+    }
+    if (/(?:制服|校服|军服|警服|私服|衣服|服装|套装|上衣|外套|衬衫|卫衣|毛衣|裙|裤|袜|鞋|靴|帽|披风|斗篷|盔甲|铠甲|和服|旗袍|礼服|泳装|睡衣|女仆装|围裙|领带|领结|手套)/.test(compact)) {
+        return true;
+    }
+    return /^(?:wear(?:ing)?|dress(?:ed)?|outfit|clothing|uniform|school uniform|change clothes|put on)\b/i.test(text);
+}
+
 function isDescriptiveCharacterFragment(value) {
     const text = safeString(value);
     if (!text) {
+        return true;
+    }
+    if (isActionOrClothingPhrase(text)) {
         return true;
     }
     if (/^(?:female|male|woman|women|man|men|girl|girls|boy|boys|subject|character|unknown|none|n\/a)$/i.test(text)) {

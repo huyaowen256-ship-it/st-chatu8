@@ -7,7 +7,7 @@ import { resolveComfyCharacterReferences } from './characterprompt.js';
 import { executeTypedLLMRequest } from './settings/llmService.js';
 import { extractCharacterAndOutfitTags } from './newline_fix.js';
 
-const BOOTSTRAP_VERSION = '20260521_mobile_refboot_dialog_v1';
+const BOOTSTRAP_VERSION = '20260522_refboot_identity_save_v1';
 const BOOTSTRAP_REQUEST_TYPE = 'char_design';
 const BOOTSTRAP_TRANSLATE_REQUEST_TYPE = 'translation';
 const BOOTSTRAP_WORKER_SELECT_ID = 'comfyAutoReferenceBootstrapWorkerId';
@@ -869,9 +869,27 @@ function englishAliasFromValues(values) {
     return '';
 }
 
+function isActionOrClothingPhrase(value) {
+    const text = asString(value);
+    const compact = text.replace(/\s+/g, '');
+    if (!compact) {
+        return false;
+    }
+    if (/^(?:穿|换|换上|换成|身穿|穿着|拿着|坐|站|躺|看|笑|哭|跑|走|去|在|做|摆)/.test(compact)) {
+        return true;
+    }
+    if (/(?:制服|校服|军服|警服|私服|衣服|服装|套装|上衣|外套|衬衫|卫衣|毛衣|裙|裤|袜|鞋|靴|帽|披风|斗篷|盔甲|铠甲|和服|旗袍|礼服|泳装|睡衣|女仆装|围裙|领带|领结|手套)/.test(compact)) {
+        return true;
+    }
+    return /^(?:wear(?:ing)?|dress(?:ed)?|outfit|clothing|uniform|school uniform|change clothes|put on)\b/i.test(text);
+}
+
 function isDescriptiveCharacterFragment(value) {
     const text = asString(value);
     if (!text) {
+        return true;
+    }
+    if (isActionOrClothingPhrase(text)) {
         return true;
     }
     if (/^(?:female|male|woman|women|man|men|girl|girls|boy|boys|subject|character|unknown|none|n\/a)$/i.test(text)) {
@@ -2104,28 +2122,37 @@ async function saveGeneratedReferenceToLocalPath(response, meta) {
     const targetPath = autoReferencePath(meta);
     const blob = await responseToBlob(response);
     const image = await blobToDataUrl(blob);
-    const result = await fetch(AUTO_REFERENCE_SAVE_ENDPOINT, {
-        method: 'POST',
-        headers: getRequestHeaders(),
-        body: JSON.stringify({ path: targetPath, image }),
-    });
-    if (!result.ok) {
-        const text = await result.text().catch(() => '');
-        throw new Error(`自动参考图保存失败：HTTP ${result.status}${text ? ` ${text}` : ''}`);
+
+    let localSaveError = null;
+    try {
+        const result = await fetch(AUTO_REFERENCE_SAVE_ENDPOINT, {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ path: targetPath, image }),
+        });
+        if (!result.ok) {
+            const text = await result.text().catch(() => '');
+            throw new Error(`HTTP ${result.status}${text ? ` ${text.slice(0, 240)}` : ''}`);
+        }
+        const data = await result.json().catch(() => ({}));
+        return asString(data.path || targetPath);
+    } catch (error) {
+        localSaveError = error;
+        console.warn('[st-chatu8] Local reference save failed; falling back to ComfyUI upload:', error);
     }
-    const data = await result.json().catch(() => ({}));
-    return asString(data.path || targetPath);
+
+    try {
+        return await uploadGeneratedReferenceBlob(blob, response, meta);
+    } catch (uploadError) {
+        throw new Error(`自动参考图保存失败：本地保存接口不可用（${localSaveError?.message || localSaveError}），ComfyUI 上传也失败（${uploadError?.message || uploadError}）。`);
+    }
 }
 
-async function uploadGeneratedReference(response, meta) {
-    if (response?.isVideo) {
-        throw new Error('首图返回的是视频，不能作为角色参考图。');
-    }
+async function uploadGeneratedReferenceBlob(blob, response, meta) {
     const url = currentComfyUrl();
     if (!url) {
         throw new Error('请先填写 ComfyUI API 地址。');
     }
-    const blob = await responseToBlob(response);
     const ext = (blob.type.match(/image\/([a-z0-9.+-]+)/i)?.[1] || asString(response?.format) || 'png').replace('jpeg', 'jpg');
     const fileName = `${fileSafeName(meta.displayName)}_auto_ref_${Date.now()}.${ext}`;
     const file = new File([blob], fileName, { type: blob.type || `image/${ext}` });
@@ -2141,6 +2168,14 @@ async function uploadGeneratedReference(response, meta) {
     const name = asString(data.name || data.filename || file.name);
     const subfolder = asString(data.subfolder);
     return subfolder ? `${subfolder}/${name}` : name;
+}
+
+async function uploadGeneratedReference(response, meta) {
+    if (response?.isVideo) {
+        throw new Error('首图返回的是视频，不能作为角色参考图。');
+    }
+    const blob = await responseToBlob(response);
+    return uploadGeneratedReferenceBlob(blob, response, meta);
 }
 
 function mergeIfEmpty(target, source, keys) {

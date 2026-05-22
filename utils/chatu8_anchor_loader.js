@@ -1,6 +1,6 @@
-const ANCHOR_PROTOCOL_VERSION = '20260521_mobile_refboot_dialog_v1';
+const ANCHOR_PROTOCOL_VERSION = '20260522_refboot_identity_save_v1';
 
-const IMAGE_PREVIEW_FIX_VERSION = '20260521_mobile_refboot_dialog_v1';
+const IMAGE_PREVIEW_FIX_VERSION = '20260522_refboot_identity_save_v1';
 const IMAGE_PREVIEW_FIX_STYLE_ID = 'st-chatu8-image-preview-fix-style';
 const IMAGE_PREVIEW_LIGHTBOX_ID = 'st-chatu8-image-lightbox-fallback';
 const installedPreviewFixDocuments = new WeakSet();
