@@ -15,7 +15,7 @@ import {
     KLEIN_PROMPT_OPTIMIZER_REQUEST_TYPE,
     optimizeKleinPromptIfNeeded,
 } from './comfy_prompt_optimizer.js';
-import { ensureComfyReferenceBootstrap } from './comfy_reference_bootstrap.js?v=20260522_single_front_reference_v1';
+import { ensureComfyReferenceBootstrap } from './comfy_reference_bootstrap.js?v=20260522_identity_workflow_guard_v1';
 
 const ANCHOR_PREFIX = 'chatu8_img';
 const RESULT_PREFIX = 'chatu8_img_result';
@@ -26,7 +26,7 @@ const IMAGE_TEXT_OPEN = 'image###';
 const IMAGE_TEXT_CLOSE = '###';
 const DEFAULT_MAX_ANCHORS = 5;
 const DEFAULT_TIMEOUT_MS = 8 * 60 * 1000;
-const TRACE_VERSION = '20260522_single_front_reference_v1';
+const TRACE_VERSION = '20260522_identity_workflow_guard_v1';
 const TRACE_LOG_LIMIT = 30;
 const TRACE_DETAIL_STRING_LIMIT = 4000;
 const ERROR_RETRY_PROMPT_LIMIT = 12000;
@@ -2535,7 +2535,7 @@ function extractReferenceFieldCandidates(text) {
         return [];
     }
     const candidates = [];
-    const pattern = /(?:^|[\s\n\r])(?:Character|\u89d2\u8272|\u4eba\u7269|\u5f53\u524d\u89d2\u8272|\u4e3b\u89d2)\s*[:\uFF1A]\s*([^\n\r]+)/gi;
+    const pattern = /(?:^|[\s\n\r])(?:Primary\s+Character|Main\s+Character|Character(?:s)?|\u4e3b\u8981\u89d2\u8272|\u4e3b\u89d2|\u89d2\u8272|\u4eba\u7269|\u5f53\u524d\u89d2\u8272)\s*[:\uFF1A]\s*([^\n\r]+)/gi;
     for (const match of source.matchAll(pattern)) {
         const candidate = cleanReferenceCharacterCandidate(match[1]);
         if (candidate) {
@@ -2612,6 +2612,7 @@ function resolveReferenceCharacterForImageAnchor(prompt, context) {
     const aliases = collectReferenceCharacterAliases();
     const explicitCandidates = extractReferenceFieldCandidates(sourceText);
     const subjectCandidates = extractSubjectFieldCandidates(sourceText);
+    const current = aliases.find((record) => record.source === 'current_character');
 
     for (const candidate of explicitCandidates) {
         const known = findKnownCharacterInCandidate(candidate, aliases);
@@ -2624,6 +2625,22 @@ function resolveReferenceCharacterForImageAnchor(prompt, context) {
         }
     }
 
+    if (explicitCandidates.length) {
+        return {
+            name: cleanReferenceCharacterCandidate(explicitCandidates[0]),
+            source: 'pending_character_field',
+            candidates: [...explicitCandidates, ...subjectCandidates],
+        };
+    }
+
+    if (current) {
+        return {
+            name: current.displayName,
+            source: 'current_character:fallback',
+            candidates: [...explicitCandidates, ...subjectCandidates],
+        };
+    }
+
     const knownInText = findKnownCharacterInText(sourceText, aliases);
     if (knownInText) {
         return {
@@ -2633,33 +2650,7 @@ function resolveReferenceCharacterForImageAnchor(prompt, context) {
         };
     }
 
-    for (const candidate of subjectCandidates) {
-        const known = findKnownCharacterInCandidate(candidate, aliases);
-        if (known) {
-            return {
-                name: known.displayName,
-                source: `${known.source}:subject_field`,
-                candidates: subjectCandidates,
-            };
-        }
-    }
-
-    for (const candidate of explicitCandidates) {
-        if (isLooseCharacterNameCandidate(candidate)) {
-            return {
-                name: cleanReferenceCharacterCandidate(candidate),
-                source: 'explicit_character_field',
-                candidates: explicitCandidates,
-            };
-        }
-    }
-
-    const current = aliases.find((record) => record.source === 'current_character');
-    return current ? {
-        name: current.displayName,
-        source: 'current_character:fallback',
-        candidates: [...explicitCandidates, ...subjectCandidates],
-    } : {
+    return {
         name: '',
         source: 'unresolved',
         candidates: [...explicitCandidates, ...subjectCandidates],
@@ -2693,6 +2684,7 @@ function buildRequest(anchor, messageId) {
             referenceCharacterName: referenceCharacter.name,
             referenceCharacterSource: referenceCharacter.source,
             debugReferenceCharacterCandidates: referenceCharacter.candidates,
+            referenceCharacterError: referenceCharacter.error || '',
         };
     }
 

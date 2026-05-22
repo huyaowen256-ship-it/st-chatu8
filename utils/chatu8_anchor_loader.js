@@ -1,6 +1,6 @@
-const ANCHOR_PROTOCOL_VERSION = '20260522_single_front_reference_v1';
+const ANCHOR_PROTOCOL_VERSION = '20260522_identity_workflow_guard_v1';
 
-const IMAGE_PREVIEW_FIX_VERSION = '20260522_single_front_reference_v1';
+const IMAGE_PREVIEW_FIX_VERSION = '20260522_identity_workflow_guard_v1';
 const IMAGE_PREVIEW_FIX_STYLE_ID = 'st-chatu8-image-preview-fix-style';
 const IMAGE_PREVIEW_LIGHTBOX_ID = 'st-chatu8-image-lightbox-fallback';
 const installedPreviewFixDocuments = new WeakSet();

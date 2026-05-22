@@ -7,7 +7,7 @@ import { resolveComfyCharacterReferences } from './characterprompt.js';
 import { executeTypedLLMRequest } from './settings/llmService.js';
 import { extractCharacterAndOutfitTags } from './newline_fix.js';
 
-const BOOTSTRAP_VERSION = '20260522_single_front_reference_v1';
+const BOOTSTRAP_VERSION = '20260522_identity_workflow_guard_v1';
 const BOOTSTRAP_REQUEST_TYPE = 'char_design';
 const BOOTSTRAP_TRANSLATE_REQUEST_TYPE = 'translation';
 const BOOTSTRAP_WORKER_SELECT_ID = 'comfyAutoReferenceBootstrapWorkerId';
@@ -780,7 +780,6 @@ function selectParsedOutfit(parsed, character) {
 function promptFromOriginalDesign(data, meta, request, fallback = '') {
     const outfit = data?.outfit && typeof data.outfit === 'object' ? data.outfit : {};
     const englishName = englishAliasFromValues([
-        data?.nameEN,
         ...(Array.isArray(meta?.requestNames) ? meta.requestNames : []),
         ...(Array.isArray(meta?.currentNames) ? meta.currentNames : []),
         meta?.displayName,
@@ -807,6 +806,7 @@ function originalCharDesignRoleName(meta, request) {
     const hasResolvedRequestName = Array.isArray(meta?.requestNames)
         && meta.requestNames.length > 0
         && meta?.requestCharacterSource !== 'unresolved';
+    const aliases = collectKnownCharacterAliasRecords(meta?.context, meta?.character, meta?.currentNames, meta?.worldBookText);
     const candidates = uniqueStrings([
         ...(hasResolvedRequestName ? meta.requestNames : []),
         request?.referenceCharacterName,
@@ -818,7 +818,7 @@ function originalCharDesignRoleName(meta, request) {
         if (!cleaned || cleaned === '当前角色' || cleaned === 'current character') {
             continue;
         }
-        if (isLooseCharacterNameCandidate(cleaned) || findKnownCharacterInCandidate(cleaned, collectKnownCharacterAliasRecords(meta?.context, meta?.character, meta?.currentNames))) {
+        if (findKnownCharacterInCandidate(cleaned, aliases)) {
             return cleaned;
         }
     }
@@ -1018,7 +1018,7 @@ function collectCurrentNames(context, character) {
     return Array.from(names);
 }
 
-function collectKnownCharacterAliasRecords(context, character, currentNames = []) {
+function collectKnownCharacterAliasRecords(context, character, currentNames = [], worldBookText = '') {
     const records = [];
     const seen = new Set();
     const add = (displayName, alias, source, priority) => {
@@ -1064,6 +1064,10 @@ function collectKnownCharacterAliasRecords(context, character, currentNames = []
         }
     }
 
+    for (const alias of collectWorldBookCharacterAliasesFromText(worldBookText)) {
+        add(alias, alias, 'world_book', 1);
+    }
+
     return records.sort((left, right) => left.priority - right.priority || right.alias.length - left.alias.length);
 }
 
@@ -1073,7 +1077,7 @@ function extractReferenceFieldCandidates(text) {
         return [];
     }
     const candidates = [];
-    const pattern = /(?:^|[\s\n\r])(?:Character|\u89d2\u8272|\u4eba\u7269|\u5f53\u524d\u89d2\u8272|\u4e3b\u89d2)\s*[:\uFF1A]\s*([^\n\r]+)/gi;
+    const pattern = /(?:^|[\s\n\r])(?:Primary\s+Character|Main\s+Character|Character(?:s)?|\u4e3b\u8981\u89d2\u8272|\u4e3b\u89d2|\u89d2\u8272|\u4eba\u7269|\u5f53\u524d\u89d2\u8272)\s*[:\uFF1A]\s*([^\n\r]+)/gi;
     for (const match of source.matchAll(pattern)) {
         const candidate = cleanExtractedCharacterName(match[1]);
         if (candidate) {
@@ -1081,6 +1085,43 @@ function extractReferenceFieldCandidates(text) {
         }
     }
     return uniqueStrings(candidates);
+}
+
+function collectWorldBookCharacterAliasesFromText(text) {
+    const source = asString(text);
+    if (!source) {
+        return [];
+    }
+    const names = new Set();
+    const addName = (value) => {
+        const raw = asString(value);
+        if (!raw) {
+            return;
+        }
+        for (const part of raw.split(/[|,，;；、\n\r]/)) {
+            const cleaned = cleanExtractedCharacterName(part) || asString(part);
+            if (cleaned && isLooseCharacterNameCandidate(cleaned)) {
+                names.add(cleaned);
+            }
+        }
+    };
+    const linePattern = /(?:^|\n)\s*(?:comment|keys|secondary_keys|中文名称|英文名称|角色名|角色名称|姓名|nameCN|nameEN|character\s+name|name)\s*[:：=]\s*([^\n\r]+)/gi;
+    for (const match of source.matchAll(linePattern)) {
+        addName(match[1]);
+    }
+    const attrPattern = /<[^>]*(?:人物|角色|character)[^>]*(?:名称|姓名|nameCN|nameEN|name)\s*=\s*["']([^"']+)["'][^>]*>/gi;
+    for (const match of source.matchAll(attrPattern)) {
+        addName(match[1]);
+    }
+    const tagPattern = /<(?:人物|角色|character)[^>]*>([\s\S]{0,1200}?)<\/(?:人物|角色|character)>/gi;
+    for (const match of source.matchAll(tagPattern)) {
+        const block = match[1];
+        const nameMatch = block.match(/(?:中文名称|英文名称|角色名|角色名称|姓名|nameCN|nameEN|character\s+name|name)\s*[:：=]\s*([^\n\r]+)/i);
+        if (nameMatch) {
+            addName(nameMatch[1]);
+        }
+    }
+    return Array.from(names);
 }
 
 function extractSubjectFieldCandidates(text) {
@@ -1145,8 +1186,18 @@ function isLooseCharacterNameCandidate(value) {
     return /^[A-Za-z][A-Za-z0-9 .'\-]{1,48}$/.test(text) && text.split(/\s+/).length <= 4;
 }
 
-function resolveRequestCharacterNames(request, context, character, currentNames = []) {
-    const aliases = collectKnownCharacterAliasRecords(context, character, currentNames);
+function unknownCharacterResult(candidate, candidates = []) {
+    const name = cleanExtractedCharacterName(candidate) || asString(candidate);
+    return {
+        names: [],
+        source: 'unknown_character_field',
+        candidates: uniqueStrings(candidates.length ? candidates : [name].filter(Boolean)),
+        error: `未知角色名：${name || '未填写'}。Character 必须命中当前角色、世界书或角色预设；Subject 只描述画面，不能作为参考图主体。`,
+    };
+}
+
+function resolveRequestCharacterNames(request, context, character, currentNames = [], worldBookText = '') {
+    const aliases = collectKnownCharacterAliasRecords(context, character, currentNames, worldBookText);
     const explicitRequestName = asString(
         request?.referenceCharacterName ||
         request?.reference_character_name ||
@@ -1162,22 +1213,24 @@ function resolveRequestCharacterNames(request, context, character, currentNames 
         request?.debugPromptRaw,
     ].map(asString).filter(Boolean).join('\n');
 
+    if (request?.referenceCharacterError) {
+        return {
+            ...unknownCharacterResult(explicitRequestName || request.referenceCharacterName, [explicitRequestName, ...(Array.isArray(request?.debugReferenceCharacterCandidates) ? request.debugReferenceCharacterCandidates : [])]),
+            error: asString(request.referenceCharacterError),
+        };
+    }
+
     if (explicitRequestName) {
         const known = findKnownCharacterInCandidate(explicitRequestName, aliases);
         if (known) {
+            const requestSource = asString(request?.referenceCharacterSource);
             return {
                 names: uniqueStrings([known.displayName, explicitRequestName]),
-                source: request?.referenceCharacterSource || `${known.source}:request`,
+                source: requestSource && !/pending|unknown/i.test(requestSource) ? requestSource : `${known.source}:request`,
                 candidates: [explicitRequestName],
             };
         }
-        if (isLooseCharacterNameCandidate(explicitRequestName)) {
-            return {
-                names: [cleanExtractedCharacterName(explicitRequestName)],
-                source: request?.referenceCharacterSource || 'explicit_request',
-                candidates: [explicitRequestName],
-            };
-        }
+        return unknownCharacterResult(explicitRequestName, [explicitRequestName]);
     }
 
     const explicitFields = extractReferenceFieldCandidates(sourceText);
@@ -1191,6 +1244,17 @@ function resolveRequestCharacterNames(request, context, character, currentNames 
             };
         }
     }
+    if (explicitFields.length) {
+        return unknownCharacterResult(explicitFields[0], explicitFields);
+    }
+
+    if (currentNames.length) {
+        return {
+            names: uniqueStrings(currentNames),
+            source: 'current_character:fallback',
+            candidates: explicitFields,
+        };
+    }
 
     const knownInText = findKnownCharacterInText(sourceText, aliases);
     if (knownInText) {
@@ -1202,28 +1266,6 @@ function resolveRequestCharacterNames(request, context, character, currentNames 
     }
 
     const subjectFields = extractSubjectFieldCandidates(sourceText);
-    for (const candidate of subjectFields) {
-        const known = findKnownCharacterInCandidate(candidate, aliases);
-        if (known) {
-            return {
-                names: uniqueStrings([known.displayName, candidate]),
-                source: `${known.source}:subject_field`,
-                candidates: subjectFields,
-            };
-        }
-    }
-
-    if (!currentNames.length) {
-        for (const candidate of explicitFields) {
-            if (isLooseCharacterNameCandidate(candidate)) {
-                return {
-                    names: [cleanExtractedCharacterName(candidate)],
-                    source: 'explicit_character_field',
-                    candidates: explicitFields,
-                };
-            }
-        }
-    }
 
     return {
         names: [],
@@ -1339,7 +1381,8 @@ async function currentCharacterMeta(request = {}) {
     const context = typeof getContext === 'function' ? getContext() : {};
     const character = getCharacterFromContext(context) || {};
     const currentNames = collectCurrentNames(context, character);
-    const requestCharacter = resolveRequestCharacterNames(request, context, character, currentNames);
+    const worldBookText = await collectWorldBookText(context, character);
+    const requestCharacter = resolveRequestCharacterNames(request, context, character, currentNames, worldBookText);
     const contextNames = requestCharacter.names;
     const stHasCurrentCharacter = hasCurrentCharacter(context, character);
     const hasRequestCharacter = contextNames.length > 0;
@@ -1362,7 +1405,6 @@ async function currentCharacterMeta(request = {}) {
         .filter(Boolean)
         .join('\n\n')
         .slice(0, 12000);
-    const worldBookText = await collectWorldBookText(context, character);
     return {
         context,
         character,
@@ -1370,6 +1412,7 @@ async function currentCharacterMeta(request = {}) {
         requestNames: contextNames,
         requestCharacterSource: requestCharacter.source,
         requestCharacterCandidates: requestCharacter.candidates,
+        requestCharacterError: requestCharacter.error || '',
         currentNames,
         displayName,
         cardText,
@@ -2148,6 +2191,28 @@ function blobToDataUrl(blob) {
     });
 }
 
+function readableErrorMessage(error) {
+    const raw = asString(error?.message || error);
+    if (!raw) {
+        return '未知错误';
+    }
+    const text = raw
+        .replace(/<!doctype[\s\S]*$/i, '页面返回 Not Found')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    if (/HTTP\s+404|Not Found/i.test(text)) {
+        return 'HTTP 404：本地参考图保存接口不存在或插件后端未加载，已尝试改走 ComfyUI 上传。';
+    }
+    if (/ECONNREFUSED|Failed to fetch|NetworkError|Load failed/i.test(text)) {
+        return '连接失败：浏览器无法访问保存接口或 ComfyUI，请检查服务地址、端口和防火墙。';
+    }
+    if (/Invalid image file/i.test(text)) {
+        return 'ComfyUI 找不到参考图文件，请确认图片已经在 ComfyUI input 目录或上传成功。';
+    }
+    return text.slice(0, 280);
+}
+
 async function saveGeneratedReferenceToLocalPath(response, meta) {
     if (response?.isVideo) {
         throw new Error('首图返回的是视频，不能作为角色参考图。');
@@ -2165,7 +2230,7 @@ async function saveGeneratedReferenceToLocalPath(response, meta) {
         });
         if (!result.ok) {
             const text = await result.text().catch(() => '');
-            throw new Error(`HTTP ${result.status}${text ? ` ${text.slice(0, 240)}` : ''}`);
+            throw new Error(`HTTP ${result.status}${text ? ` ${readableErrorMessage(text)}` : ''}`);
         }
         const data = await result.json().catch(() => ({}));
         return asString(data.path || targetPath);
@@ -2177,7 +2242,7 @@ async function saveGeneratedReferenceToLocalPath(response, meta) {
     try {
         return await uploadGeneratedReferenceBlob(blob, response, meta);
     } catch (uploadError) {
-        throw new Error(`自动参考图保存失败：本地保存接口不可用（${localSaveError?.message || localSaveError}），ComfyUI 上传也失败（${uploadError?.message || uploadError}）。`);
+        throw new Error(`自动参考图保存失败：本地保存不可用（${readableErrorMessage(localSaveError)}），ComfyUI 上传也失败（${readableErrorMessage(uploadError)}）。`);
     }
 }
 
@@ -2253,13 +2318,20 @@ function bindReferencePath(meta, bootstrapData, referencePath, finalPrompt) {
     }
 
     const existing = findCurrentCharacterPreset(meta, false);
-    const presetBase = originalDesignPresetBase(bootstrapData.nameCN || bootstrapData.nameEN || meta.displayName, meta);
+    const trustedIdentity = trustedBootstrapIdentityName(bootstrapData, meta);
+    const canonicalName = meta.displayName || trustedIdentity || '当前角色';
+    const canonicalEnglishName = englishAliasFromValues([
+        ...(Array.isArray(meta.requestNames) ? meta.requestNames : []),
+        ...(Array.isArray(meta.currentNames) ? meta.currentNames : []),
+        canonicalName,
+    ]) || canonicalName;
+    const presetBase = originalDesignPresetBase(canonicalName || trustedIdentity || bootstrapData.nameCN || bootstrapData.nameEN, meta);
     const presetId = existing?.presetId || uniquePresetId(presetBase, data.characterPresets);
     const preset = existing?.preset || {};
     const safeFinalPrompt = sanitizeEnglishPrompt(finalPrompt, bootstrapData.referencePromptEN || preset.photoPrompt || defaultEnglishReferencePrompt());
     mergeIfEmpty(preset, {
-        nameCN: bootstrapData.nameCN || meta.displayName,
-        nameEN: bootstrapData.nameEN || meta.displayName,
+        nameCN: canonicalName,
+        nameEN: canonicalEnglishName,
         characterTraits: bootstrapData.characterTraits,
         facialFeatures: bootstrapData.facialFeatures,
         facialFeaturesBack: bootstrapData.facialFeaturesBack,
@@ -2340,6 +2412,15 @@ function bootstrapDesignIdentityName(bootstrapData) {
     return '';
 }
 
+function trustedBootstrapIdentityName(bootstrapData, meta) {
+    const identityName = bootstrapDesignIdentityName(bootstrapData);
+    if (!identityName) {
+        return '';
+    }
+    const aliases = collectKnownCharacterAliasRecords(meta?.context, meta?.character, meta?.currentNames, meta?.worldBookText);
+    return findKnownCharacterInCandidate(identityName, aliases) ? identityName : '';
+}
+
 function isWeakBootstrapIdentity(meta) {
     const displayName = asString(meta?.displayName);
     const requestNames = Array.isArray(meta?.requestNames) ? meta.requestNames : [];
@@ -2359,7 +2440,7 @@ function metaWithBootstrapIdentity(meta, bootstrapData) {
     if (!isWeakBootstrapIdentity(meta)) {
         return meta;
     }
-    const identityName = bootstrapDesignIdentityName(bootstrapData);
+    const identityName = trustedBootstrapIdentityName(bootstrapData, meta);
     if (!identityName) {
         return meta;
     }
@@ -2532,6 +2613,16 @@ function addStyle() {
             line-height: 1.45;
             overflow-wrap: anywhere;
         }
+        .st-chatu8-refboot-identity {
+            padding: 8px 10px;
+            border: 1px solid rgba(160, 180, 190, 0.18);
+            border-radius: 6px;
+            background: #101821;
+            color: #dce8ee;
+            font-size: 13px;
+            line-height: 1.45;
+            overflow-wrap: anywhere;
+        }
         .st-chatu8-refboot-status[data-kind="error"] { color: #ffc2b8; }
         .st-chatu8-refboot-status[data-kind="ok"] { color: #c9f7d4; }
         .st-chatu8-refboot-bottom-status {
@@ -2554,6 +2645,7 @@ function addStyle() {
             font-weight: 650;
             cursor: pointer;
             opacity: 1;
+            touch-action: manipulation;
         }
         .st-chatu8-refboot-dialog .st-chatu8-btn:hover:not(:disabled) {
             border-color: #8fc7dc;
@@ -2625,6 +2717,13 @@ function showBootstrapDialog(meta, request, bootstrapData) {
         return activeDialogPromise;
     }
     addStyle();
+    const identityLines = [
+        `本次绑定角色：${meta.displayName}`,
+        meta.requestCharacterSource ? `来源：${meta.requestCharacterSource}` : '',
+        Array.isArray(meta.requestCharacterCandidates) && meta.requestCharacterCandidates.length
+            ? `候选：${meta.requestCharacterCandidates.slice(0, 6).join(' / ')}`
+            : '',
+    ].filter(Boolean);
     activeDialogPromise = new Promise((resolve, reject) => {
         let generatedResponse = null;
         let closed = false;
@@ -2638,6 +2737,7 @@ function showBootstrapDialog(meta, request, bootstrapData) {
                 </div>
                 <div class="st-chatu8-refboot-body">
                     <div class="st-chatu8-refboot-fields">
+                        <div class="st-chatu8-refboot-identity">${escapeHtml(identityLines.join('；'))}</div>
                         <label class="st-chatu8-refboot-label">角色/服装设定稿
                             <textarea class="st-chatu8-refboot-textarea st-chatu8-refboot-cn">${escapeHtml(bootstrapData.stChatu8DesignText || bootstrapData.referencePromptCN)}</textarea>
                         </label>
@@ -2722,7 +2822,7 @@ function showBootstrapDialog(meta, request, bootstrapData) {
                 setStatus('提示词已更新，可以生成首图。', 'ok');
             } catch (error) {
                 en.value = sanitizeEnglishPrompt(previousPrompt, bootstrapData.referencePromptEN);
-                setStatus(`${error?.message || String(error)}；已保留原英文提示词。`, 'error');
+                setStatus(`${readableErrorMessage(error)}；已保留原英文提示词。`, 'error');
             } finally {
                 if (!closed) {
                     setBusy(false);
@@ -2742,7 +2842,7 @@ function showBootstrapDialog(meta, request, bootstrapData) {
             } catch (error) {
                 generatedResponse = null;
                 preview.innerHTML = '<span>生成失败</span>';
-                setStatus(error?.message || String(error), 'error');
+                setStatus(readableErrorMessage(error), 'error');
             } finally {
                 if (!closed) {
                     setBusy(false);
@@ -2763,7 +2863,7 @@ function showBootstrapDialog(meta, request, bootstrapData) {
                 cleanup();
                 resolve(result);
             } catch (error) {
-                setStatus(error?.message || String(error), 'error');
+                setStatus(readableErrorMessage(error), 'error');
                 if (!closed) {
                     setBusy(false);
                 }
@@ -2779,6 +2879,14 @@ export async function ensureComfyReferenceBootstrap(request, context = {}) {
     }
     syncBootstrapWorkerSelect();
     const meta = await currentCharacterMeta(request);
+    if (meta?.requestCharacterError) {
+        context?.traceEvent?.(context.trace, 'reference_bootstrap:invalid_character', {
+            character: request?.referenceCharacterName || '',
+            candidates: Array.isArray(meta.requestCharacterCandidates) ? meta.requestCharacterCandidates : [],
+            error: meta.requestCharacterError,
+        }, true);
+        throw new Error(meta.requestCharacterError);
+    }
     const gate = referenceBootstrapGate(request, meta);
     context?.traceEvent?.(context.trace, 'reference_bootstrap:gate', gate, false);
     if (gate?.allowed) {
